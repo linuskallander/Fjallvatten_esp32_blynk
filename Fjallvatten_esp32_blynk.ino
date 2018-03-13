@@ -15,6 +15,7 @@ char auth[] = "721dbb4ddb714f71835d52ec2626cb56";
 // Set password to "" for open networks.
 char ssid[] = "Sambokojan";
 char pass[] = "abc123def";
+char server[] = "blynk-cloud.com";
 
 BlynkTimer timer;
 RTC_DS3231 rtc;
@@ -39,6 +40,7 @@ WidgetTerminal terminal(V20);
 #define MANUAL_VALVE_PIN_2 4
 #define PAUSE_PIN 27
 #define LED_BUILTIN 2
+#define WIFI_LED 13
 
 
 // SETTINGS
@@ -79,6 +81,10 @@ bool valveState2;
 int soilSens1 = 0;
 int soilSens2 = 0; // variables to store the value coming from the soil humitidy sensor
 
+unsigned int myServerTimeout  =  3500;  //  3.5s server connection timeout (SCT)
+unsigned int myWiFiTimeout    =  3200;  //  3.2s WiFi connection timeout   (WCT)
+unsigned int functionInterval =  7500;  //  7.5s function call frequency   (FCF)
+unsigned int blynkInterval    = 25000;  // 25.0s check server frequency    (CSF)
 
 char daysOfTheWeek[7][12] = {"Söndag", "Måndag", "Tisdag", "Onsdag", "Torsdag", "Fredag", "Lördag"};
 
@@ -125,40 +131,68 @@ void setup()
   // Debug console
   Serial.begin(9600);
 
-  Blynk.begin(auth, ssid, pass);
+
+      pinMode(SENSORS_VCC, OUTPUT);
+
+      pinMode(ERROR_LED1_PIN, OUTPUT);
+      pinMode(ERROR_LED2_PIN, OUTPUT);
+      pinMode(VALVE_PIN_1, OUTPUT);
+      pinMode(VALVE_PIN_2, OUTPUT);
+      pinMode(LED_BUILTIN, OUTPUT);
+      pinMode(VALVE_LEDPIN_1, OUTPUT);
+      pinMode(VALVE_LEDPIN_2, OUTPUT);
+      pinMode(WIFI_LED, OUTPUT);
+
+      pinMode(RAIN_SENS_PIN, INPUT);
+      pinMode(MANUAL_VALVE_PIN_1, INPUT);
+      pinMode(MANUAL_VALVE_PIN_2, INPUT);
+      pinMode(PAUSE_PIN, INPUT);
+      pinMode(SOIL_SENS_PIN_1, INPUT);
+      pinMode(SOIL_SENS_PIN_2, INPUT);
+
+    if(WiFi.status() == 6){
+        Serial.println("\tWiFi not connected yet.");
+      }
+    //timer.setInterval(functionInterval, myfunction);// run some function at intervals per functionInterval
+    timer.setInterval(blynkInterval, checkBlynk);   // check connection to server per blynkInterval
+    timer.setInterval(1000L, sendStatsToServer);
+    timer.setInterval(1000L, runAutonomously);
+    timer.setInterval(10L, runManually);
+
+
+    unsigned long startWiFi = millis();
+    WiFi.begin(ssid, pass);
+    digitalWrite(WIFI_LED, HIGH);
+    while (WiFi.status() != WL_CONNECTED){
+      delay(500);
+      if(millis() > startWiFi + myWiFiTimeout){
+        Serial.println("\tCheck the WiFi router. ");
+        break;
+      }
+    digitalWrite(WIFI_LED, LOW);
+    }
+    Blynk.config(auth, server);
+    checkBlynk();
+
+  //Blynk.begin(auth, ssid, pass);
   // You can also specify server:
   //Blynk.begin(auth, ssid, pass, "blynk-cloud.com", 8442);
   //Blynk.begin(auth, ssid, pass, IPAddress(192,168,1,100), 8442);
 
-  // Setup a function to be called every second
-  timer.setInterval(1000L, sendStatsToServer);
-  timer.setInterval(1000L, runAutonomously);
-  // timer.setInterval(10L, runManually);
 
 
-
-    pinMode(SENSORS_VCC, OUTPUT);
-    pinMode(SOIL_SENS_PIN_1, INPUT);
-    pinMode(SOIL_SENS_PIN_2, INPUT);
-
-    pinMode(ERROR_LED1_PIN, OUTPUT);
-    pinMode(ERROR_LED2_PIN, OUTPUT);
-    pinMode(VALVE_PIN_1, OUTPUT);
-    pinMode(VALVE_PIN_2, OUTPUT);
-    pinMode(LED_BUILTIN, OUTPUT);
-    pinMode(VALVE_LEDPIN_1, OUTPUT);
-    pinMode(VALVE_LEDPIN_2, OUTPUT);
-
-    pinMode(RAIN_SENS_PIN, INPUT);
-    pinMode(MANUAL_VALVE_PIN_1, INPUT);
-    pinMode(MANUAL_VALVE_PIN_2, INPUT);
-    pinMode(PAUSE_PIN, INPUT);
 
     lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
     lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
-    Blynk.virtualWrite(V13, LOW);
+    if (Blynk.connected()){
+      Blynk.virtualWrite(V13, LOW);
+      Blynk.virtualWrite(V14, LOW);
+      valveVLED1.off();
+      valveVLED2.off();
+      errorLED1.off();
+      errorLED2.off();
+      }
     appSwitch1 = 0;
-    Blynk.virtualWrite(V14, LOW);
     appSwitch2 = 0;
     digitalWrite(VALVE_PIN_1, LOW);
     digitalWrite(VALVE_PIN_2, LOW);
@@ -183,21 +217,31 @@ void setup()
 
 void loop()
 {
-  Blynk.run();
+  if (Blynk.connected()) {Blynk.run();}
+  //Blynk.run();
   timer.run(); // Initiates BlynkTimer
-  runManually();
 
 }
 
 void sendStatsToServer() {
-  readSensors();
-  digitalWrite(LED_BUILTIN, HIGH);
-  Blynk.virtualWrite(V10, soilSens1);
-  Blynk.virtualWrite(V11, soilSens2);
-  if(valveState1){Blynk.virtualWrite(V15,1);}
-  if(valveState2){Blynk.virtualWrite(V16,1);}
-  delay(20);
-  digitalWrite(LED_BUILTIN, LOW);
+  // Serial.println("\tLook, no Blynk  block.");
+  if(WiFi.status()== 3){
+    // Serial.println("\tWiFi still  connected.");
+
+  }
+  if(Blynk.connected()){
+    readSensors();
+    digitalWrite(LED_BUILTIN, HIGH);
+    digitalWrite(WIFI_LED, HIGH);
+    Blynk.virtualWrite(V10, soilSens1);
+    Blynk.virtualWrite(V11, soilSens2);
+    if(valveState1){Blynk.virtualWrite(V15,1);}
+    if(valveState2){Blynk.virtualWrite(V16,1);}
+    delay(20);
+    digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(WIFI_LED, LOW);
+  }
+
 }
 
 void runAutonomously() {
@@ -232,74 +276,88 @@ void runAutonomously() {
 
 void runManually() {
   // Manual switches
-  if (appSwitch1 == 1){
-    if (!valveState1){ //If virtual button turned on and valve is closed...
-      valveControll("open", 1);
-      printTimeToTerminal();
-      terminal.println("Ventil 1 öppnad via app");
-    }
-  } else {
-    if (valveState1){
-      valveControll("close", 1);
-      printTimeToTerminal();
-      terminal.println("Ventil 1 stängd via app");
+  if (Blynk.connected()) {
+    if (appSwitch1 == 1){
+      if (!valveState1){ //If virtual button turned on and valve is closed...
+        valveControll("open", 1);
+        printTimeToTerminal();
+        terminal.println("Ventil 1 öppnad via app");
+      }
+    } else {
+      if (valveState1){
+        valveControll("close", 1);
+        printTimeToTerminal();
+        terminal.println("Ventil 1 stängd via app");
+      }
     }
   }
 
   if (digitalRead(MANUAL_VALVE_PIN_1) != lastSwitchState1){
     if (!valveState1) {
       valveControll("open", 1);
-      Blynk.virtualWrite(V13, HIGH); //Set virtual button to ON
       appSwitch1 = 1;
       lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
-      printTimeToTerminal();
-      terminal.println("Ventil 1 öppnad manuellt");
+      if (Blynk.connected()) {
+        Blynk.virtualWrite(V13, HIGH); //Set virtual button to ON
+        printTimeToTerminal();
+        terminal.println("Ventil 1 öppnad manuellt");
+      }
 
     }
     else {
       valveControll("close", 1);
-      Blynk.virtualWrite(V13, LOW);
       appSwitch1 = 0;
       lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
-      printTimeToTerminal();
-      terminal.println("Ventil 1 stängd manuellt");
+
+      if (Blynk.connected()) {
+        Blynk.virtualWrite(V13, LOW);
+        printTimeToTerminal();
+        terminal.println("Ventil 1 stängd manuellt");
+      }
     }
   }
 
-
-  if (appSwitch2 == 1){
-    if (!valveState2){ //If virtual button turned on and valve is closed...
-      valveControll("open", 2);
-      printTimeToTerminal();
-      terminal.println("Ventil 2 öppnad via app");
-    }
-  } else {
-    if (valveState2){
-      valveControll("close", 2);
-      printTimeToTerminal();
-      terminal.println("Ventil 2 stängd via app");
+  if (Blynk.connected()) {
+    if (appSwitch2 == 1){
+      if (!valveState2){ //If virtual button turned on and valve is closed...
+        valveControll("open", 2);
+        printTimeToTerminal();
+        terminal.println("Ventil 2 öppnad via app");
+      }
+    } else {
+      if (valveState2){
+        valveControll("close", 2);
+        printTimeToTerminal();
+        terminal.println("Ventil 2 stängd via app");
+      }
     }
   }
 
   if (digitalRead(MANUAL_VALVE_PIN_2) != lastSwitchState2){
     if (!valveState2) {
       valveControll("open", 2);
-      Blynk.virtualWrite(V14, HIGH); //Set virtual button to ON
       appSwitch2 = 1;
       lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
-      printTimeToTerminal();
-      terminal.println("Ventil 2 öppnad manuellt");
+      if (Blynk.connected()){
+        Blynk.virtualWrite(V14, HIGH); //Set virtual button to ON
+        printTimeToTerminal();
+        terminal.println("Ventil 2 öppnad manuellt");
+
+      }
     }
     else {
       valveControll("close", 2);
-      Blynk.virtualWrite(V14, LOW);
       appSwitch2 = 0;
       lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
-      printTimeToTerminal();
-      terminal.println("Ventil 2 stängd manuellt");
+
+      if (Blynk.connected()){
+        Blynk.virtualWrite(V14, LOW);
+        printTimeToTerminal();
+        terminal.println("Ventil 2 stängd manuellt");
+      }
     }
   }
-    terminal.flush();
+    // terminal.flush();
 }
 
 void valveControll(String direction, int valve){
@@ -308,36 +366,45 @@ void valveControll(String direction, int valve){
       if (direction == "open"){
         digitalWrite(VALVE_PIN_1, HIGH); //open valve
         digitalWrite(VALVE_LEDPIN_1, HIGH); //turn on physical LED
-        valveVLED1.on(); //Turn on virtual LED
         valveState1 = true; //Flag to mark valve as open
-        //Blynk.virtualWrite(V15,1);
+        if (Blynk.connected()){
+          valveVLED1.on(); //Turn on virtual LED
+          Blynk.virtualWrite(V15,1);
+
+        }
       }
       else {
         digitalWrite(VALVE_PIN_1, LOW);
-        valveVLED1.off();
         digitalWrite(VALVE_LEDPIN_1, LOW);
         valveState1 = false;
-        //Blynk.virtualWrite(V15,0);
+        if (Blynk.connected()){
+          valveVLED1.off();
+          Blynk.virtualWrite(V15,0);
+        }
       }
       break;
     case 2:
       if (direction == "open"){
         digitalWrite(VALVE_PIN_2, HIGH); //open valve
         digitalWrite(VALVE_LEDPIN_2, HIGH); //turn on physical LED
-        valveVLED2.on(); //Turn on virtual LED
         valveState2 = true; //Flag to mark valve as open
-        Blynk.virtualWrite(V16,1);
+        if (Blynk.connected()){
+          valveVLED2.on(); //Turn on virtual LED
+          Blynk.virtualWrite(V16,1);
+        }
       }
       else {
         digitalWrite(VALVE_PIN_2, LOW);
-        valveVLED2.off();
-        digitalWrite(VALVE_LEDPIN_2, LOW);
         valveState2 = false;
-        Blynk.virtualWrite(V16,0);
+        digitalWrite(VALVE_LEDPIN_2, LOW);
+        if (Blynk.connected()){
+          valveVLED2.off();
+          Blynk.virtualWrite(V16,0);
+        }
       }
       break;
     default:
-      terminal.println("DEBUG: Valve action called without specified valve id.");
+      if (Blynk.connected()){terminal.println("DEBUG: Valve action called without specified valve id.");}
   }
 
 }
@@ -499,3 +566,27 @@ void readSensors() {
 
     }
   }
+
+
+void checkBlynk() {
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    unsigned long startConnecting = millis();
+
+    digitalWrite(WIFI_LED, HIGH);
+    while(!Blynk.connected()){
+      Blynk.connect();
+      if(millis() > startConnecting + myServerTimeout){
+        Serial.print("Unable to connect to server. ");
+        digitalWrite(WIFI_LED, LOW);
+        break;
+      }
+    digitalWrite(WIFI_LED, LOW);
+    }
+  }
+  if (WiFi.status() != 3) {
+    Serial.print("\tNo WiFi. ");
+  }
+  Serial.printf("\tChecking again in %is.\n", blynkInterval / 1000);
+  Serial.println();
+}
