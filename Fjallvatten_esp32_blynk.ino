@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <BlynkSimpleEsp32.h>
+#include <TimeLib.h>
+#include <WidgetRTC.h>
 
 // You should get Auth Token in the Blynk App.
 // Go to the Project Settings (nut icon).
@@ -19,6 +21,7 @@ char server[] = "blynk-cloud.com";
 
 BlynkTimer timer;
 RTC_DS3231 rtc;
+WidgetRTC vrtc;
 WidgetLED valveVLED1(V7);
 WidgetLED valveVLED2(V8);
 WidgetLED errorLED1(V6);
@@ -46,7 +49,13 @@ WidgetTerminal terminal(V20);
 // SETTINGS
 int hourLaunch = 05; // Hour when automated watering should start
 int minuteLaunch = 30;
-int limitWater = 0; // Set to 1 if there is a water restriction in Gnesta.
+int autoLaunch = (3600 * 5 + 60 * 30); //Time to launch automatic watering, in seconds. (3600 * hour + 60 * minutes)
+int launchValve_1 = 0; // 0 = off, 1 = scheduled, 2=extreme
+int launchValve_2 = 0;
+bool disableExtreme = false;
+bool disableSchedule = false;
+bool disableManual = false;
+bool limitWater = false; // Set to 1 if there is a water restriction in Gnesta.
 int nightModeHourStart = 21; //No extra watering during night hours
 int nightModeHourEnd = 7;
 
@@ -55,7 +64,7 @@ int moistLevelLow = 30;
 int moistLevelScheduleCycleOff = 50;
 int moistLevelExtraCycleOff = 40;
 
-int maxCycle = 30;  //Maximum time of watercycle
+int maxCycle = 1;  //Maximum time of watercycle
 int pauseTime = 60; // duration to pause on force pause, in minutes.
 
 //VARIABLES
@@ -73,6 +82,10 @@ int appSwitchLastState2;
 int switchState1 = false;
 int switchState2 = false;
 
+int valveOpen1, valveOpen2;
+bool wateringOnValve_1, wateringOnValve_2;
+unsigned long valveOpened_1, valveOpened_2;
+int soilSens1StartingValue, soilSens2StartingValue;
 int lastSwitchState1;
 int lastSwitchState2;
 bool valveState1;
@@ -80,48 +93,35 @@ bool valveState2;
 
 int soilSens1 = 0;
 int soilSens2 = 0; // variables to store the value coming from the soil humitidy sensor
+int connectionCount = 0; //Counter to system if wifi has not connected after X tries.
 
 unsigned int myServerTimeout  =  3500;  //  3.5s server connection timeout (SCT)
 unsigned int myWiFiTimeout    =  3200;  //  3.2s WiFi connection timeout   (WCT)
 unsigned int functionInterval =  7500;  //  7.5s function call frequency   (FCF)
 unsigned int blynkInterval    = 25000;  // 25.0s check server frequency    (CSF)
 
-char daysOfTheWeek[7][12] = {"Söndag", "Måndag", "Tisdag", "Onsdag", "Torsdag", "Fredag", "Lördag"};
+char daysOfTheWeek[7][12] = {"Sö", "Må", "Ti", "On", "To", "Fr", "Lö"};
 
 // This function will run every time Blynk connection is established
 BLYNK_CONNECTED() {
   // Request Blynk server to re-send latest values for all pins
   Blynk.syncAll();
+  vrtc.begin();
 }
 
-BLYNK_WRITE(V0)
-{moistLevelScheduleCycleOff = param.asInt();}
 
-BLYNK_WRITE(V1)
-{moistLevelLow = param.asInt();}
+BLYNK_WRITE(V0){moistLevelLow = param.asInt();}
+BLYNK_WRITE(V1){moistLevelScheduleCycleOff = param.asInt();}
+BLYNK_WRITE(V2){moistlevelExtreme = param.asInt();}
+BLYNK_WRITE(V3){moistLevelExtraCycleOff = param.asInt();}
+BLYNK_WRITE(V4){autoLaunch = param.asInt();}
+BLYNK_WRITE(V13){appSwitch1 = param.asInt();}
+BLYNK_WRITE(V14){appSwitch2 = param.asInt();}
+BLYNK_WRITE(V20){terminal.flush();}
 
-BLYNK_WRITE(V2)
-{moistlevelExtreme = param.asInt();}
-
-BLYNK_WRITE(V3)
-{moistLevelExtraCycleOff = param.asInt();}
-
-BLYNK_WRITE(V13)
-{appSwitch1 = param.asInt();}
-
-BLYNK_WRITE(V14)
-{appSwitch2 = param.asInt();}
-
-BLYNK_WRITE(V20)
-{
-  terminal.flush();
-}
-
-void sendStatsToServer();
-
-void runAutonomously();
-
-void runManually();
+// void sendStatsToServer();
+// void runAutonomously();
+// void runManually();
 
 void setup()
 {
@@ -158,6 +158,7 @@ void setup()
     timer.setInterval(1000L, sendStatsToServer);
     timer.setInterval(1000L, runAutonomously);
     timer.setInterval(10L, runManually);
+    timer.setInterval(100L, waterCycle);
 
 
     unsigned long startWiFi = millis();
@@ -169,17 +170,10 @@ void setup()
         Serial.println("\tCheck the WiFi router. ");
         break;
       }
-    digitalWrite(WIFI_LED, LOW);
     }
+    digitalWrite(WIFI_LED, LOW);
     Blynk.config(auth, server);
     checkBlynk();
-
-  //Blynk.begin(auth, ssid, pass);
-  // You can also specify server:
-  //Blynk.begin(auth, ssid, pass, "blynk-cloud.com", 8442);
-  //Blynk.begin(auth, ssid, pass, IPAddress(192,168,1,100), 8442);
-
-
 
 
     lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
@@ -213,6 +207,7 @@ void setup()
     }
 
     DateTime now = rtc.now();
+    if (Blynk.connected()){adjustTime();}
 }
 
 void loop()
@@ -240,6 +235,7 @@ void sendStatsToServer() {
     delay(20);
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
+    adjustTime();
   }
 
 }
@@ -247,117 +243,140 @@ void sendStatsToServer() {
 void runAutonomously() {
 
   DateTime now = rtc.now();
-  readSensors();
+  int currentTimeInSeconds = 3600 * now.hour() + 60 * now.minute();
 
-  //If the time is right, it's not raining and no errors are
-  //reported, start scheduled watering
-  if (rainSens == HIGH || !errorValve2 || !errorValve1) {
-  //checkTime();
-  // Scheduled watering
+  // Launch scheduled watering
+  if (currentTimeInSeconds == autoLaunch) {
+    readSensors();
+    // Serial.println(rainSens);
+    // Serial.println(errorValve1);
+    // Serial.println(launchValve_1);
+    // Serial.println(moistLevelLow);
+    // Serial.println(soilSens1);
+    // delay(5000);
 
-    if (now.hour() == hourLaunch && now.minute() == minuteLaunch) {
-      WaterCycle(1); // Initiate water cycle (on schedule)
+    // TODO: Rain sensor does not work
+    //if (rainSens == HIGH) {
+      if (!errorValve1 && launchValve_1 == 0 && moistLevelLow > soilSens1){
+        Serial.println("automatisk bevattning på V1.");
+        launchValve_1 = 1;
+        disableExtreme = true;
+        disableManual = true;
       }
-     else {
-
-      // If we are not in a scheduled cycle, do this:
-
-      if (limitWater == 0) { //If there is a limitation on water, only water on schedule
-        if (soilSens1 > moistlevelExtreme || soilSens2 > moistlevelExtreme) {
-         if (now.hour() > nightModeHourEnd && now.hour() < nightModeHourStart) { // Don't panic-water during the night.
-            WaterCycle(0); // Initiate water cycle
-         }
-        }
+      if (!errorValve2 && launchValve_2 == 0 && moistLevelLow > soilSens2){
+        Serial.println("automatisk bevattning på V2.");
+        launchValve_2 = 1;
+        disableExtreme = true;
+        disableManual = true;
       }
-     }
-    //rainmode:
-    }
+      //WaterCycle(1); // Initiate water cycle (on schedule)
+    //}
+  }
+  if (!limitWater && now.hour() > nightModeHourEnd && now.hour() < nightModeHourStart) { //If there is a limitation on water, only water on schedule
+    readSensors();
+    //if (rainSens == HIGH){
+      if(!errorValve1 && soilSens1 < moistlevelExtreme){
+        launchValve_1 = 2;
+        disableSchedule = true;
+        disableManual = true;
+      }
+      if(!errorValve2 && soilSens2 < moistlevelExtreme){
+        launchValve_2 = 2;
+        disableSchedule = true;
+        disableManual = true;
+      }
+      //WaterCycle(0); // Initiate water cycle
+    //}
+  }
 }
 
 void runManually() {
-  // Manual switches
-  if (Blynk.connected()) {
-    if (appSwitch1 == 1){
-      if (!valveState1){ //If virtual button turned on and valve is closed...
+
+  if (!disableManual){//If we are in a watering cycle, disable manual watering.
+    // Manual switches
+    if (Blynk.connected()) {
+      if (appSwitch1 == 1){
+        if (!valveState1){ //If virtual button turned on and valve is closed...
+          valveControll("open", 1);
+          printTimeToTerminal();
+          terminal.println("Ventil 1 öppnad via app");
+        }
+      } else {
+        if (valveState1){
+          valveControll("close", 1);
+          printTimeToTerminal();
+          terminal.println("Ventil 1 stängd via app");
+        }
+      }
+    }
+
+    if (digitalRead(MANUAL_VALVE_PIN_1) != lastSwitchState1){
+      if (!valveState1) {
         valveControll("open", 1);
-        printTimeToTerminal();
-        terminal.println("Ventil 1 öppnad via app");
+        appSwitch1 = 1;
+        lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
+        if (Blynk.connected()) {
+          Blynk.virtualWrite(V13, HIGH); //Set virtual button to ON
+          printTimeToTerminal();
+          terminal.println("Ventil 1 öppnad manuellt");
+        }
+
       }
-    } else {
-      if (valveState1){
+      else {
         valveControll("close", 1);
-        printTimeToTerminal();
-        terminal.println("Ventil 1 stängd via app");
+        appSwitch1 = 0;
+        lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
+
+        if (Blynk.connected()) {
+          Blynk.virtualWrite(V13, LOW);
+          printTimeToTerminal();
+          terminal.println("Ventil 1 stängd manuellt");
+        }
       }
     }
-  }
 
-  if (digitalRead(MANUAL_VALVE_PIN_1) != lastSwitchState1){
-    if (!valveState1) {
-      valveControll("open", 1);
-      appSwitch1 = 1;
-      lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
-      if (Blynk.connected()) {
-        Blynk.virtualWrite(V13, HIGH); //Set virtual button to ON
-        printTimeToTerminal();
-        terminal.println("Ventil 1 öppnad manuellt");
-      }
-
-    }
-    else {
-      valveControll("close", 1);
-      appSwitch1 = 0;
-      lastSwitchState1 = digitalRead(MANUAL_VALVE_PIN_1);
-
-      if (Blynk.connected()) {
-        Blynk.virtualWrite(V13, LOW);
-        printTimeToTerminal();
-        terminal.println("Ventil 1 stängd manuellt");
+    if (Blynk.connected()) {
+      if (appSwitch2 == 1){
+        if (!valveState2){ //If virtual button turned on and valve is closed...
+          valveControll("open", 2);
+          printTimeToTerminal();
+          terminal.println("Ventil 2 öppnad via app");
+        }
+      } else {
+        if (valveState2){
+          valveControll("close", 2);
+          printTimeToTerminal();
+          terminal.println("Ventil 2 stängd via app");
+        }
       }
     }
-  }
 
-  if (Blynk.connected()) {
-    if (appSwitch2 == 1){
-      if (!valveState2){ //If virtual button turned on and valve is closed...
+    if (digitalRead(MANUAL_VALVE_PIN_2) != lastSwitchState2){
+      if (!valveState2) {
         valveControll("open", 2);
-        printTimeToTerminal();
-        terminal.println("Ventil 2 öppnad via app");
+        appSwitch2 = 1;
+        lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
+        if (Blynk.connected()){
+          Blynk.virtualWrite(V14, HIGH); //Set virtual button to ON
+          printTimeToTerminal();
+          terminal.println("Ventil 2 öppnad manuellt");
+
+        }
       }
-    } else {
-      if (valveState2){
+      else {
         valveControll("close", 2);
-        printTimeToTerminal();
-        terminal.println("Ventil 2 stängd via app");
+        appSwitch2 = 0;
+        lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
+
+        if (Blynk.connected()){
+          Blynk.virtualWrite(V14, LOW);
+          printTimeToTerminal();
+          terminal.println("Ventil 2 stängd manuellt");
+        }
       }
     }
+    if (Blynk.connected()) {terminal.flush();}
   }
-
-  if (digitalRead(MANUAL_VALVE_PIN_2) != lastSwitchState2){
-    if (!valveState2) {
-      valveControll("open", 2);
-      appSwitch2 = 1;
-      lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
-      if (Blynk.connected()){
-        Blynk.virtualWrite(V14, HIGH); //Set virtual button to ON
-        printTimeToTerminal();
-        terminal.println("Ventil 2 öppnad manuellt");
-
-      }
-    }
-    else {
-      valveControll("close", 2);
-      appSwitch2 = 0;
-      lastSwitchState2 = digitalRead(MANUAL_VALVE_PIN_2);
-
-      if (Blynk.connected()){
-        Blynk.virtualWrite(V14, LOW);
-        printTimeToTerminal();
-        terminal.println("Ventil 2 stängd manuellt");
-      }
-    }
-  }
-    // terminal.flush();
 }
 
 void valveControll(String direction, int valve){
@@ -408,8 +427,210 @@ void valveControll(String direction, int valve){
   }
 
 }
+void waterCycle(){
 
-void WaterCycle(bool scheduled) {
+  if (launchValve_1 == 1 || launchValve_2 == 1 && !pauseWaterCycle && !disableSchedule) {
+    // thresholdMoist = moistLevelLow;
+    // endMoist = moistLevelScheduleCycleOff;
+    readSensors();
+
+    // Scheduled watering on valve 1
+    if (launchValve_1 == 1 && !errorValve1 && !valveState2){
+      if (!valveState1) {
+        soilSens1StartingValue = soilSens1;
+        valveOpened_1 = millis();
+        valveControll("open", 1);
+        if(Blynk.connected()){
+          printTimeToTerminal();
+          terminal.println("Ventil 1 har öppnats enligt schema.");
+        }
+      }
+      else {
+        if (soilSens1 >= moistLevelScheduleCycleOff) {
+          valveControll("close", 1);
+          launchValve_1 = 0;
+        }
+        else {
+          if ((millis() - valveOpened_1) >= (maxCycle*60*1000)){
+            if (soilSens1StartingValue >= soilSens1 - 2 && soilSens1StartingValue <= soilSens1 + 2 ) {
+              //Error
+              digitalWrite(ERROR_LED1_PIN, HIGH);
+              errorValve1 = true;
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 1 inte registrerat förändrad fuktighet inom maxtid. Troligen har ett fel uppstått.");
+                errorLED1.on();
+              }
+            }
+            else {
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 1 har varit öppen så länge som systemet tillåter.");
+              }
+            }
+            if(Blynk.connected()){
+              printTimeToTerminal();
+              terminal.printf("\tVentil 1 stängs efter %i sekunder.\n", round((millis() - valveOpened_1)/60000));
+            }
+            valveControll("close", 1);
+            launchValve_1 = 0;
+          }
+        }
+      }
+    }
+
+    //scheduled watering on valve 2
+    if (launchValve_2 == 1 && !errorValve2 && !valveState1){
+      if (!valveState2) {
+        soilSens2StartingValue = soilSens2;
+        valveOpened_2 = millis();
+        valveControll("open", 2);
+        if(Blynk.connected()){
+          printTimeToTerminal();
+          terminal.println("Ventil 2 har öppnats enligt schema.");
+        }
+      }
+      else {
+        if (soilSens2 >= moistLevelScheduleCycleOff) {
+          valveControll("close", 2);
+          launchValve_2 = 0;
+        }
+        else {
+          if ((millis() - valveOpened_2) >= (maxCycle*60*1000)){
+            if (soilSens2StartingValue >= soilSens2 - 2 && soilSens2StartingValue <= soilSens2 + 2 ) {
+              //Error
+              digitalWrite(ERROR_LED2_PIN, HIGH);
+              errorValve2 = true;
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 2 inte registrerat förändrad fuktighet inom maxtid. Troligen har ett fel uppstått.");
+                errorLED2.on();
+              }
+            }
+            else {
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 2 har varit öppen så länge som systemet tillåter.");
+
+              }
+            }
+            if(Blynk.connected()){
+              printTimeToTerminal();
+              terminal.printf("\tVentil 2 stängs efter %i minuter.\n", round((millis() - valveOpened_2)/60000));
+            }
+            valveControll("close", 2);
+            launchValve_2 = 0;
+          }
+        }
+      }
+    }
+  }
+  if (launchValve_1 == 0 && launchValve_2 == 0 && disableExtreme){
+    disableExtreme = false;
+    disableManual = false;
+  }
+
+  if (launchValve_1 == 2 || launchValve_2 == 2 && !pauseWaterCycle && !disableExtreme){
+
+    readSensors();
+    // Extreme watering on valve 1
+    if (launchValve_1 == 2 && !errorValve1 && !valveState2){
+      if (!valveState1) {
+        soilSens1StartingValue = soilSens1;
+        valveOpened_1 = millis();
+        valveControll("open", 1);
+        if(Blynk.connected()){
+          printTimeToTerminal();
+          terminal.println("Ventil 1 har öppnats enligt schema.");
+        }
+      }
+      else {
+        if (soilSens1 >= moistLevelExtraCycleOff) {
+          valveControll("close", 1);
+          launchValve_1 = 0;
+        }
+        else {
+          if ((millis() - valveOpened_1) >= (maxCycle*60*1000)){
+            if (soilSens1StartingValue >= (soilSens1 - 2) && soilSens1StartingValue <= (soilSens1 + 2) ) {
+              //Error
+              digitalWrite(ERROR_LED1_PIN, HIGH);
+              errorValve1 = true;
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 1 inte registrerat förändrad fuktighet inom maxtid. Troligen har ett fel uppstått.");
+                errorLED1.on();
+              }
+            }
+            else {
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 1 har varit öppen så länge som systemet tillåter.");
+              }
+            }
+            if(Blynk.connected()){
+              printTimeToTerminal();
+              terminal.printf("\tVentil 1 stängs efter %i sekunder.\n", round((millis() - valveOpened_1)/60000));
+            }
+            valveControll("close", 1);
+            launchValve_1 = 0;
+          }
+        }
+      }
+    }
+    //extreme watering on valve 2
+    if (launchValve_2 == 1 && !errorValve2 && !valveState1){
+      if (!valveState2) {
+        soilSens2StartingValue = soilSens2;
+        valveOpened_2 = millis();
+        valveControll("open", 2);
+        if(Blynk.connected()){
+          printTimeToTerminal();
+          terminal.println("Ventil 2 har öppnats pga extrem torka.");
+        }
+      }
+      else {
+        if (soilSens2 >= moistLevelExtraCycleOff) {
+          valveControll("close", 2);
+          launchValve_2 = 0;
+        }
+        else {
+          if ((millis() - valveOpened_2) >= (maxCycle*60*1000)){
+            if (soilSens2StartingValue >= soilSens2 - 2 && soilSens2StartingValue <= soilSens2 + 2 ) {
+              //Error
+              digitalWrite(ERROR_LED2_PIN, HIGH);
+              errorValve2 = true;
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 2 inte registrerat förändrad fuktighet inom maxtid. Troligen har ett fel uppstått.");
+                errorLED2.on();
+              }
+            }
+            else {
+              if(Blynk.connected()){
+                printTimeToTerminal();
+                terminal.println("Ventil 2 har varit öppen så länge som systemet tillåter.");
+
+              }
+            }
+            if(Blynk.connected()){
+              printTimeToTerminal();
+              terminal.printf("\tVentil 2 stängs efter %i minuter.\n", round((millis() - valveOpened_2)/60000));
+            }
+            valveControll("close", 2);
+            launchValve_2 = 0;
+          }
+        }
+      }
+    }
+  }
+  if (launchValve_1 == 0 && launchValve_2 == 0 && disableSchedule){
+    disableSchedule = false;
+    disableManual = false;
+  }
+  if(Blynk.connected()){terminal.flush();}
+}
+
+void WaterCycleOld(bool scheduled) {
   DateTime now = rtc.now();
   int endMoist;
   int forceEnd = 0;
@@ -455,8 +676,8 @@ void WaterCycle(bool scheduled) {
     forceStop1:
 
     //terminal.println("Ventil 1 stängd pga pause");
-    digitalWrite(VALVE_PIN_1,LOW);
-    valveVLED1.off(); //Turn on virtual LED
+    // digitalWrite(VALVE_PIN_1,LOW);
+    // valveVLED1.off(); //Turn on virtual LED
     if(errorValve1){
       return;
     }
@@ -488,8 +709,8 @@ void WaterCycle(bool scheduled) {
       }
     }
     forceStop2:
-    digitalWrite(VALVE_PIN_2,LOW);
-    valveVLED1.off(); //Turn on virtual LED
+    // digitalWrite(VALVE_PIN_2,LOW);
+    // valveVLED2.off(); //Turn on virtual LED
     if(errorValve2){
       return;
     }
@@ -526,11 +747,10 @@ void readSensors() {
 
   void printTimeToTerminal(){
     DateTime now = rtc.now();
-    terminal.print(now.year(), DEC);
-    terminal.print('-');
-    terminal.print(now.month(), DEC);
-    terminal.print('-');
-    terminal.print(now.day(), DEC);
+    // terminal.print(now.month(), DEC);
+    // terminal.print('-');
+    // terminal.print(now.day(), DEC);
+    Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
     terminal.print(" ");
     if (now.hour()<10){terminal.print('0');}
     terminal.print(now.hour(), DEC);
@@ -586,7 +806,30 @@ void checkBlynk() {
   }
   if (WiFi.status() != 3) {
     Serial.print("\tNo WiFi. ");
+    connectionCount++;
+    if (connectionCount == 40){ // Reset system if wifi has connected after 40 tries.
+      connectionCount = 0;
+      software_Reset();
+    }
   }
   Serial.printf("\tChecking again in %is.\n", blynkInterval / 1000);
   Serial.println();
+}
+
+
+void software_Reset() // Restarts program from beginning but does not reset the peripherals and registers
+{
+  if(Blynk.connected()){
+    printTimeToTerminal();
+    terminal.println("Systemet startade om på begäran från app.");
+    errorLED1.off();
+    errorLED2.off();
+  }
+  ESP.restart();
+}
+
+void adjustTime(){
+  if (Blynk.connected()){
+    rtc.adjust(DateTime(year(), month(), day(), hour(), minute(), second()));
+  }
 }
