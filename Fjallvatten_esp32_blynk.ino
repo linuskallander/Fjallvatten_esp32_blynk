@@ -8,6 +8,9 @@
 #include <BlynkSimpleEsp32.h>
 #include <TimeLib.h>
 #include <WidgetRTC.h>
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 
 // You should get Auth Token in the Blynk App.
 // Go to the Project Settings (nut icon).
@@ -32,7 +35,7 @@ WidgetTerminal terminal(V20);
 #define SOIL_SENS_PIN_1 A7
 #define SOIL_SENS_PIN_2 A6
 #define SENSORS_VCC 23 // powers soilsensors and rainsensor
-#define RAIN_SENS_PIN 19
+#define RAIN_SENS_PIN 5
 #define VALVE_PIN_1 12
 #define VALVE_PIN_2 14
 #define VALVE_LEDPIN_1 32
@@ -162,6 +165,7 @@ void setup()
 
 
     unsigned long startWiFi = millis();
+    WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, pass);
     digitalWrite(WIFI_LED, HIGH);
     while (WiFi.status() != WL_CONNECTED){
@@ -208,6 +212,40 @@ void setup()
 
     DateTime now = rtc.now();
     if (Blynk.connected()){adjustTime();}
+
+    // Code for OTA updates
+
+    ArduinoOTA
+      .onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH)
+          type = "sketch";
+        else // U_SPIFFS
+          type = "filesystem";
+
+        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+        Serial.println("Start updating " + type);
+      })
+      .onEnd([]() {
+        Serial.println("\nEnd");
+      })
+      .onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+      })
+      .onError([](ota_error_t error) {
+        Serial.printf("Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+      });
+
+    ArduinoOTA.begin();
+
+    Serial.println("Ready");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
 }
 
 void loop()
@@ -215,7 +253,7 @@ void loop()
   if (Blynk.connected()) {Blynk.run();}
   //Blynk.run();
   timer.run(); // Initiates BlynkTimer
-
+  ArduinoOTA.handle();
 }
 
 void sendStatsToServer() {
@@ -248,15 +286,13 @@ void runAutonomously() {
   // Launch scheduled watering
   if (currentTimeInSeconds == autoLaunch) {
     readSensors();
-    // Serial.println(rainSens);
     // Serial.println(errorValve1);
     // Serial.println(launchValve_1);
     // Serial.println(moistLevelLow);
     // Serial.println(soilSens1);
     // delay(5000);
 
-    // TODO: Rain sensor does not work
-    //if (rainSens == HIGH) {
+    if (rainSens == HIGH) {
       if (!errorValve1 && launchValve_1 == 0 && moistLevelLow > soilSens1){
         Serial.println("automatisk bevattning på V1.");
         launchValve_1 = 1;
@@ -269,12 +305,11 @@ void runAutonomously() {
         disableExtreme = true;
         disableManual = true;
       }
-      //WaterCycle(1); // Initiate water cycle (on schedule)
-    //}
+    }
   }
   if (!limitWater && now.hour() > nightModeHourEnd && now.hour() < nightModeHourStart) { //If there is a limitation on water, only water on schedule
     readSensors();
-    //if (rainSens == HIGH){
+    if (rainSens == HIGH){
       if(!errorValve1 && soilSens1 < moistlevelExtreme){
         launchValve_1 = 2;
         disableSchedule = true;
@@ -285,8 +320,7 @@ void runAutonomously() {
         disableSchedule = true;
         disableManual = true;
       }
-      //WaterCycle(0); // Initiate water cycle
-    //}
+    }
   }
 }
 
