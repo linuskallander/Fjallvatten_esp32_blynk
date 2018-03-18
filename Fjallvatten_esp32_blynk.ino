@@ -162,7 +162,7 @@ void setup()
       }
     //timer.setInterval(functionInterval, myfunction);// run some function at intervals per functionInterval
     timer.setInterval(blynkInterval, checkBlynk);   // check connection to server per blynkInterval
-    timer.setInterval(1000L, sendStatsToServer);
+    timer.setInterval(3000L, sendStatsToServer);
     timer.setInterval(1000L, runAutonomously);
     timer.setInterval(10L, runManually);
     timer.setInterval(100L, waterCycle);
@@ -257,7 +257,8 @@ void loop()
   if (Blynk.connected()) {Blynk.run();}
   //Blynk.run();
   timer.run(); // Initiates BlynkTimer
-  ArduinoOTA.handle();
+  ArduinoOTA.handle()
+
 }
 
 void sendStatsToServer() {
@@ -277,7 +278,7 @@ void sendStatsToServer() {
     delay(20);
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
-    adjustTime();
+    // adjustTime();
   }
 
 }
@@ -285,8 +286,12 @@ void sendStatsToServer() {
 void runAutonomously() {
 
   DateTime now = rtc.now();
-  int currentTimeInSeconds = 3600 * now.hour() + 60 * now.minute();
-
+  int currentTimeInSeconds;
+  if(Blynk.connected()){
+    currentTimeInSeconds = 3600 * hour() + 60 * minute();
+  } else {
+    currentTimeInSeconds = 3600 * now.hour() + 60 * now.minute();
+    }
   // Launch scheduled watering
   if (currentTimeInSeconds == autoLaunch && !disableSchedule) {
     readSensors();
@@ -305,7 +310,18 @@ void runAutonomously() {
       }
     }
   }
-  if (!disableExtreme && !limitWater && now.hour() > nightModeHourEnd && now.hour() < nightModeHourStart) { //If there is a limitation on water, only water on schedule
+
+  int currentHour, currentMinute;
+  if(Blynk.connected()){
+    currentHour = hour();
+    currentMinute = minute();
+  } else {
+    currentHour = now.hour();
+    currentMinute = now.minute();
+
+  }
+
+  if (!disableExtreme && !limitWater && currentHour > nightModeHourEnd && currentMinute < nightModeHourStart) { //If there is a limitation on water, only water on schedule
     readSensors();
     if (rainSens == HIGH){
       if(!errorValve1 && soilSens1 < moistlevelExtreme){
@@ -592,9 +608,8 @@ void readSensors() {
 
     // soil sensors
 
-    soilSens1 = map((4095-analogRead(SOIL_SENS_PIN_1)), 0, 4095, 0, 100);
-    soilSens2 = map((4095-analogRead(SOIL_SENS_PIN_2)), 0, 4095, 0, 100);
-
+    soilSens1 = map((analogRead(SOIL_SENS_PIN_1)), 3200, 1450, 0, 100);
+    soilSens2 = map((analogRead(SOIL_SENS_PIN_2)), 3200, 1450, 0, 100);
 
     //rain sensor (Digital LOW means it's raining)
     rainSens = digitalRead(RAIN_SENS_PIN);
@@ -605,19 +620,34 @@ void readSensors() {
 
   void printTimeToTerminal(){
     DateTime now = rtc.now();
+
+    int tagHour, tagMinute, tagMonth, tagDay;
+    if(Blynk.connected()){
+      tagMonth = month();
+      tagDay = day();
+      tagHour = hour();
+      tagMinute = minute();
+    } else {
+      tagMonth = now.month();
+      tagDay = now.day();
+      tagHour = now.hour();
+      tagMinute = now.minute();
+
+    }
     // terminal.print(now.month(), DEC);
     // terminal.print('-');
     // terminal.print(now.day(), DEC);
-    terminal.print(daysOfTheWeek[now.dayOfTheWeek()]);
+    terminal.print("[");
+    terminal.print(tagMonth);
+    terminal.print("-");
+    terminal.print(tagDay);
     terminal.print(" ");
-    if (now.hour()<10){terminal.print('0');}
-    terminal.print(now.hour(), DEC);
+    if (tagHour<10){terminal.print('0');}
+    terminal.print(tagHour, DEC);
     terminal.print(':');
-    if (now.minute()<10){terminal.print('0');}
-    terminal.print(now.minute(), DEC);
-    terminal.print(':');
-    if (now.second()<10){terminal.print('0');}
-    terminal.print(now.second(), DEC);
+    if (tagMinute<10){terminal.print('0');}
+    terminal.print(tagMinute, DEC);
+    terminal.print("]");
     terminal.print(' ');
   }
 
@@ -700,8 +730,8 @@ void adjustTime(){
   }
   if (now.minute()==165){
       if (Blynk.connected()){
-        terminal.println("RTC error noticed. Restart system.");
+        terminal.println("Fel på systemklocka. Försök starta om systemet.");
         terminal.flush();}
-    software_Reset(0);
+    //software_Reset(0);
   }
 }
