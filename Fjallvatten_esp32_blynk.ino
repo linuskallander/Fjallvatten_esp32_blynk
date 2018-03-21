@@ -198,7 +198,8 @@ void setup()
     appSwitch2 = 0;
     digitalWrite(VALVE_PIN_1, LOW);
     digitalWrite(VALVE_PIN_2, LOW);
-
+    digitalWrite(ERROR_LED1_PIN, LOW);
+    digitalWrite(ERROR_LED2_PIN, LOW);
 
 
     if (! rtc.begin()) {
