@@ -1,5 +1,6 @@
 /* Comment this out to disable prints and save space */
 #define BLYNK_PRINT Serial
+// #define ESP_INTR_FLAG_DEFAULT 0
 
 //#include <SPI.h>
 #include "RTClib.h"
@@ -11,6 +12,7 @@
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+
 
 // You should get Auth Token in the Blynk App.
 // Go to the Project Settings (nut icon).
@@ -41,13 +43,15 @@ WidgetLCD lcd(V22);
 #define VALVE_PIN_2 14
 #define VALVE_LEDPIN_1 32
 #define VALVE_LEDPIN_2 33
-#define ERROR_LED1_PIN 25
+#define ERROR_LED1_PIN 25 //temporary
 #define ERROR_LED2_PIN 26
 #define MANUAL_VALVE_PIN_1 18
 #define MANUAL_VALVE_PIN_2 4
 #define PAUSE_PIN 27
 #define LED_BUILTIN 2
 #define WIFI_LED 13
+#define FLOWPIN 15
+#define TEMP_SENS 39
 
 
 // SETTINGS
@@ -72,6 +76,22 @@ int maxCycle = 1;  //Maximum time of watercycle
 int pauseTime = 60; // duration to pause on force pause, in minutes.
 
 //VARIABLES
+double flowRate;    //This is the value we intend to calculate.
+volatile double pulseCount; //This integer needs to be set as volatile to ensure it updates correctly during the interrupt process.
+double waterTotal, waterTotalAdd, waterForever;
+double waterToday, waterTodayAdd, waterSinceLastUpdate;
+float calibrationFactor = 6.6;
+unsigned int flowMilliLitres;
+unsigned long totalMilliLitres;
+
+unsigned long oldTime;
+int todayDate;
+int x, lastX ;
+double z;
+String output;
+
+
+
 int stepperValue, stepperValueCurrent;
 int sensorCycle;
 bool rainSens; // HIGH means it's not raining
@@ -96,6 +116,7 @@ int lastSwitchState2;
 bool valveState1;
 bool valveState2;
 
+int tempSens = 0;
 int soilSens1 = 0;
 int soilSens2 = 0; // variables to store the value coming from the soil humitidy sensor
 int connectionCount = 0; //Counter to system if wifi has not connected after X tries.
@@ -131,6 +152,28 @@ BLYNK_WRITE(V17){
 }
 BLYNK_WRITE(V20){
 
+  if (String("RWT") == param.asStr()) {
+    Blynk.virtualWrite(V100, 0);
+    waterTotal = 0;
+    terminal.println("\nTotal water this year is reset.") ;
+  }
+
+  if (String("R4EVER") == param.asStr()) {
+    Blynk.virtualWrite(V98, 0);
+    terminal.println("\nForever watercounter is reset.");
+  }
+
+  if (String("SHOW4EVER") == param.asStr()) {
+    terminal.println("\nValue is updated at midnigt.");
+    terminal.print(waterForever/1000);
+    terminal.println("m³");
+  }
+  if (String("help") == param.asStr()) {
+    terminal.println("\nThis is what you can do");
+    terminal.println("RWT: Reset this years watercounter");
+    terminal.println("R4EVER: Reset total watercounter");
+    terminal.println("SHOW4EVER: Display total watercounter");
+  }
   terminal.flush();
 }
 BLYNK_WRITE(V9){
@@ -142,17 +185,15 @@ BLYNK_WRITE(V9){
     nightModeHourEnd = (t.getStopHour()*3600)+t.getStopMinute() * 60;
   }
 }
+BLYNK_WRITE(V100) {waterTotal = param.asDouble();}
+BLYNK_WRITE(V99) {waterToday = param.asDouble();}
+BLYNK_WRITE(V98) {waterForever = param.asDouble();}
+BLYNK_WRITE(V97) {todayDate = param.asInt();}
 
-
-// void sendStatsToServer();
-// void runAutonomously();
-// void runManually();
 
 void setup()
 {
-  #ifndef ESP8266
-    while (!Serial); // for Leonardo/Micro/Zero
-  #endif
+
   // Debug console
   Serial.begin(9600);
 
@@ -174,6 +215,14 @@ void setup()
       pinMode(PAUSE_PIN, INPUT);
       pinMode(SOIL_SENS_PIN_1, INPUT);
       pinMode(SOIL_SENS_PIN_2, INPUT);
+      pinMode(TEMP_SENS, INPUT);
+      pinMode(FLOWPIN, INPUT_PULLUP);           //Sets the pin as an input
+      attachInterrupt(digitalPinToInterrupt(FLOWPIN), flow, RISING);  //Configures interrupt 0 (pin 2 on the Arduino Uno) to run the function "Flow"
+
+      // gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+      //
+      // gpio_isr_handler_add(FLOWPIN, flow);
+
 
     if(WiFi.status() == 6){
         Serial.println("\tWiFi not connected yet.");
@@ -185,6 +234,7 @@ void setup()
     timer.setInterval(10, runManually);
     timer.setInterval(1000, waterCycle);
     timer.setInterval(10, digitalDisplay);
+    timer.setInterval(1000,calculateWaterflow);
     // timer.setInterval(100, digitalDisplay);
 
 
@@ -222,6 +272,12 @@ void setup()
     digitalWrite(ERROR_LED1_PIN, LOW);
     digitalWrite(ERROR_LED2_PIN, LOW);
 
+    pulseCount        = 0;
+    flowRate          = 0;
+    flowMilliLitres   = 0;
+    totalMilliLitres  = 0;
+    waterSinceLastUpdate = 0;
+    oldTime           = millis();
 
     if (! rtc.begin()) {
       Serial.println("Couldn't find RTC");
@@ -273,12 +329,16 @@ void setup()
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
 
-    stepperValue = 6;
+    stepperValue = 0;
+    if (Blynk.connected()){Blynk.digitalWrite(V17, 0);}
     digitalDisplay();
+
 }
 
 void loop()
 {
+
+  interrupts();   //Enables interrupts on the Arduino
   if (Blynk.connected()) {Blynk.run();}
   //Blynk.run();
   timer.run(); // Initiates BlynkTimer
@@ -288,37 +348,55 @@ void loop()
 void digitalDisplay() {
   if (stepperValue != stepperValueCurrent){
     lcd.clear();
-
     switch (stepperValue) {
       case 0:
-        lcd.print(0,0, "Pause indication");
-        // lcd.print(0,1, hour());
+
+        lcd.print(0,0,"Välkommen till");
+        lcd.print(0,1,"Fjällvatten");
         break;
       case 1:
         readSensors("partial");
         lcd.print(0,0, "Fukt 1: ");
-        lcd.print(8,0, soilSens1);
+        lcd.print(8,0, round(soilSens1));
         lcd.print(10,0,"%");
         lcd.print(0,1, "Fukt 2: ");
-        lcd.print(8,1, soilSens2);
+        lcd.print(8,1, round(soilSens2));
         lcd.print(10,1,"%");
         break;
-
       case 2:
-        lcd.print(0,0,"Temperatur");
+        lcd.print(0,0,"Vattenflöde");
+        lcd.print(0,1,int(flowRate));
+        if (flowRate>=10){x=3;} else {x=2;}
+        lcd.print(x,1,"L/min");
         break;
       case 3:
-        lcd.print(0,0,"vatten, total");
+        lcd.print(0,0,"Vatten idag");
+        z = roundf(waterToday*10000)/10000;
+        output = (String)z;
+        output += "L";
+        if (z<=9){x = 1;}
+        if (z>=10 && z<=99) {x=2;}
+        if (z>100) {x=3;}
+        if (lastX != x) {
+            lcd.print(0,1,"            ");
+        }
+        lcd.print(0,1, output);
         break;
       case 4:
-        lcd.print(0,0,"Water, today");
+        z = roundf(waterTotal*100)/100;
+        lcd.print(0,0,"Vatten totalt");
+        lcd.print(0,1,(String)z);
+          if (z<=9){x = 4;}
+          if (z>=10 && z<=99) {x=5;}
+          if (z>100) {x=6;}
+        lcd.print(x,1,"m³");
         break;
       case 5:
         lcd.print(0,0, "Det regnar!");
         break;
-      case 6:
-        lcd.print(0,0,"Välkommen till");
-        lcd.print(0,1,"Fjällvatten");
+      case 7:
+          lcd.print(0,0, "Pause indication");
+          // lcd.print(0,1, hour());
         break;
     }
     stepperValueCurrent = stepperValue;
@@ -332,7 +410,20 @@ void sendStatsToServer() {
   //   // Serial.println("\tWiFi still  connected.");
   //
   // }
+
   if(Blynk.connected()){
+    if (day() != todayDate){
+      Blynk.virtualWrite(V99, 0);
+      Blynk.virtualWrite(V26, waterToday);
+      Blynk.virtualWrite(V98, waterForever + waterToday);
+      waterToday = 0;
+      todayDate = day();
+    }
+    waterTotal += (waterSinceLastUpdate/1000000); //Store totals water as cubic meters
+    waterToday += (waterSinceLastUpdate/1000); // Store todays water as liters
+    waterSinceLastUpdate = 0;
+
+
     readSensors("partial");
     digitalWrite(LED_BUILTIN, HIGH);
     digitalWrite(WIFI_LED, HIGH);
@@ -340,10 +431,60 @@ void sendStatsToServer() {
     Blynk.virtualWrite(V11, soilSens2);
     if(valveState1){Blynk.virtualWrite(V15,100);}
     if(valveState2){Blynk.virtualWrite(V16,100);}
+    Blynk.virtualWrite(V100, waterTotal);
+    Blynk.virtualWrite(V99, waterToday);
     delay(20);
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
+
+
     // adjustTime();
+    // Update LCD values every time stats are sent to server
+    switch (stepperValue) {
+      case 1:
+        lcd.print(8,0, round(soilSens1));
+        lcd.print(8,1, round(soilSens2));
+        break;
+      case 2:
+        // only print L/min if position is changed
+        if (int(flowRate) == 0 ){
+          x = 2;
+        } else {
+          x = floor(log10(abs(int(flowRate)))) + 2; // values above 10 results in X = 3, less then 10 results in x = 2
+        }
+        if (lastX != x) {
+            lcd.print(1,1,"       ");
+            lcd.print(x,1,"L/min");
+        }
+        lcd.print(0,1,int(flowRate));
+        lastX = x;
+      break;
+      case 3:
+        z = roundf(waterToday*10000)/10000;
+        output = (String)z;
+        output += "L";
+        if (z<=9){x = 1;}
+        if (z>=10 && z<=99) {x=2;}
+        if (z>100) {x=3;}
+        if (lastX != x) {
+            lcd.print(0,1,"            ");
+        }
+        lcd.print(0,1, output);
+        break;
+      case 4:
+        z = roundf(waterTotal*100)/100;
+        output = (String)z;
+        output += "m³";
+        if (z<=9){x = 1;}
+        if (z>=10 && z<=99) {x=2;}
+        if (z>100) {x=3;}
+        if (lastX != x) {
+            lcd.print(0,1,"            ");
+        }
+        lcd.print(0,1, output);
+
+        break;
+    }
   }
 }
 
@@ -675,6 +816,86 @@ void waterCycle(){
   if(Blynk.connected()){terminal.flush();}
 }
 }
+
+void calculateWaterflow(){
+
+  if (millis()>9000) {
+  // Disable the interrupt while calculating flow rate and sending the value to
+  // the host
+  if (pulseCount >= 1000) {
+      pulseCount == 0;
+  }
+  detachInterrupt(digitalPinToInterrupt(FLOWPIN));
+
+
+  // Because this loop may not complete in exactly 1 second intervals we calculate
+  // the number of milliseconds that have passed since the last execution and use
+  // that to scale the output. We also apply the calibrationFactor to scale the output
+  // based on the number of pulses per second per units of measure (litres/minute in
+  // this case) coming from the sensor.
+  flowRate = ((1000.0 / (millis() - oldTime)) * pulseCount) / calibrationFactor;
+  // Note the time this processing pass was executed. Note that because we've
+  // disabled interrupts the millis() function won't actually be incrementing right
+  // at this point, but it will still return the value it was set to just before
+  // interrupts went away.
+  oldTime = millis();
+  // Reset the pulse counter so we can start incrementing again
+  pulseCount = 0;
+  attachInterrupt(digitalPinToInterrupt(FLOWPIN), flow, RISING);
+
+
+  // Divide the flow rate in litres/minute by 60 to determine how many litres have
+  // passed through the sensor in this 1 second interval, then multiply by 1000 to
+  // convert to millilitres.
+  flowMilliLitres = (flowRate / 60) * 1000;
+
+  // Add the millilitres passed in this second to a cumulative variable thats added to value stored online
+  waterSinceLastUpdate += flowMilliLitres;
+
+
+
+
+  }
+  // DateTime now = rtc.now();
+  // int datum;
+  // // Reset water today counter at midnight
+  // if(Blynk.connected()){
+  //   datum = day();
+  // } else {
+  //   datum = now.day();
+  // }
+  //
+  // if (datum != todayDate) {
+  //   waterToday == 0
+  // }
+  //
+  // flowRate = (count / 6.6);        // According to specs Frequency F = 6.6 * Q (Q=L/Min)
+  //
+  // // flowRate = flowRate * 60;         //Convert seconds to minutes, giving you mL / Minute
+  // // flowRate = flowRate / 1000;       //Convert mL to Liters, giving you Liters / Minute
+  // waterTodayAdd = waterTodayAdd + (count / 306);
+  // waterTotal = waterTotal + waterTodayAdd;
+  // // Update LCD values every second if the value is shown
+  // switch (stepperValue) {
+  //   case 3:
+  //     lcd.print(0,1,flowRate);
+  //
+  //   break;
+  //   case 4:
+  //     lcd.print(0,1,waterTodayAdd);
+  //   case 5:
+  //     lcd.print(0,1, waterTotalAdd);
+  //     break;
+  // }
+  //
+  // if (Blynk.connected()){
+  //
+  //   Blynk.virtualWrite(V100, waterTotalAdd);
+  // }
+  // Serial.println(waterTotalAdd);
+  // count = 0;
+}
+
 void readSensors(String type) {
     int d;
     if (valveState1 || valveState2){
@@ -690,8 +911,8 @@ void readSensors(String type) {
     soilSens1 = map((analogRead(SOIL_SENS_PIN_1)), 3980, 1600, 0, 100);
     delay(d); //make sure the sensor is powered
     soilSens2 = map((analogRead(SOIL_SENS_PIN_2)), 3980, 1600, 0, 100);
-    delay(d); //make sure the sensor is powered
-    // Serial.println(analogRead(SOIL_SENS_PIN_1));
+
+
     // Serial.println(analogRead(SOIL_SENS_PIN_2));
      if (type == "full"){
     digitalWrite(SENSORS_VCC, HIGH); // Rain sensor only powered on reading to prevent corrosion
@@ -721,9 +942,9 @@ void readSensors(String type) {
     // terminal.print('-');
     // terminal.print(now.day(), DEC);
     terminal.print("[");
-    terminal.print(tagMonth);
-    terminal.print("-");
     terminal.print(tagDay);
+    terminal.print("/");
+    terminal.print(tagMonth);
     terminal.print(" ");
     if (tagHour<10){terminal.print('0');}
     terminal.print(tagHour, DEC);
@@ -762,6 +983,10 @@ void readSensors(String type) {
       pausendM = now.minute()+(pauseTime-(pauseHours*60));
 
     }
+  }
+void flow()
+  {
+     pulseCount++; //Every time this function is called, increment "count" by 1
   }
 
 
