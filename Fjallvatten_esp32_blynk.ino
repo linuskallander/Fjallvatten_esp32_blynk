@@ -78,11 +78,10 @@ int pauseTime = 60; // duration to pause on force pause, in minutes.
 //VARIABLES
 double flowRate;    //This is the value we intend to calculate.
 volatile double pulseCount; //This integer needs to be set as volatile to ensure it updates correctly during the interrupt process.
-double waterTotal, waterTotalAdd, waterForever;
-double waterToday, waterTodayAdd, waterSinceLastUpdate;
+double waterTotal, waterForever;
+double waterToday, waterSinceLastUpdate;
 float calibrationFactor = 6.6;
 unsigned int flowMilliLitres;
-unsigned long totalMilliLitres;
 
 unsigned long oldTime;
 int todayDate;
@@ -123,9 +122,14 @@ int connectionCount = 0; //Counter to system if wifi has not connected after X t
 
 unsigned int myServerTimeout  =  3500;  //  3.5s server connection timeout (SCT)
 unsigned int myWiFiTimeout    =  3200;  //  3.2s WiFi connection timeout   (WCT)
-unsigned int blynkInterval    = 25000;  // 25.0s check server frequency    (CSF)
+unsigned int blynkInterval    = 20000;  // 25.0s check server frequency    (CSF)
 
-char daysOfTheWeek[7][12] = {"Sö", "Må", "Ti", "On", "To", "Fr", "Lö"};
+// char daysOfTheWeek[7][12] = {"Sö", "Må", "Ti", "On", "To", "Fr", "Lö"};
+// This is called when Smartphone App is opened
+BLYNK_APP_CONNECTED() {
+  stepperValue = 0;
+  Blynk.virtualWrite(V17, 0);
+}
 
 // This function will run every time Blynk connection is established
 BLYNK_CONNECTED() {
@@ -158,22 +162,23 @@ BLYNK_WRITE(V20){
     terminal.println("\nTotal water this year is reset.") ;
   }
 
-  if (String("R4EVER") == param.asStr()) {
+  else if (String("R4EVER") == param.asStr()) {
     Blynk.virtualWrite(V98, 0);
     terminal.println("\nForever watercounter is reset.");
   }
 
-  if (String("SHOW4EVER") == param.asStr()) {
+  else if (String("SHOW4EVER") == param.asStr()) {
     terminal.println("\nValue is updated at midnigt.");
     terminal.print(waterForever/1000);
     terminal.println("m³");
   }
-  if (String("help") == param.asStr()) {
+  else if (String("help") == param.asStr()) {
     terminal.println("\nThis is what you can do");
     terminal.println("RWT: Reset this years watercounter");
     terminal.println("R4EVER: Reset total watercounter");
     terminal.println("SHOW4EVER: Display total watercounter");
   }
+  else {terminal.println("\nUnrecognized command. Type help to see available commands.");}
   terminal.flush();
 }
 BLYNK_WRITE(V9){
@@ -275,7 +280,6 @@ void setup()
     pulseCount        = 0;
     flowRate          = 0;
     flowMilliLitres   = 0;
-    totalMilliLitres  = 0;
     waterSinceLastUpdate = 0;
     oldTime           = millis();
 
@@ -330,7 +334,7 @@ void setup()
     Serial.println(WiFi.localIP());
 
     stepperValue = 0;
-    if (Blynk.connected()){Blynk.digitalWrite(V17, 0);}
+    if (Blynk.connected()){Blynk.virtualWrite(V17, 0);}
     digitalDisplay();
 
 }
@@ -350,46 +354,23 @@ void digitalDisplay() {
     lcd.clear();
     switch (stepperValue) {
       case 0:
-
         lcd.print(0,0,"Välkommen till");
         lcd.print(0,1,"Fjällvatten");
         break;
       case 1:
-        readSensors("partial");
         lcd.print(0,0, "Fukt 1: ");
-        lcd.print(8,0, round(soilSens1));
         lcd.print(10,0,"%");
         lcd.print(0,1, "Fukt 2: ");
-        lcd.print(8,1, round(soilSens2));
         lcd.print(10,1,"%");
         break;
       case 2:
         lcd.print(0,0,"Vattenflöde");
-        lcd.print(0,1,int(flowRate));
-        if (flowRate>=10){x=3;} else {x=2;}
-        lcd.print(x,1,"L/min");
         break;
       case 3:
         lcd.print(0,0,"Vatten idag");
-        z = roundf(waterToday*10000)/10000;
-        output = (String)z;
-        output += "L";
-        if (z<=9){x = 1;}
-        if (z>=10 && z<=99) {x=2;}
-        if (z>100) {x=3;}
-        if (lastX != x) {
-            lcd.print(0,1,"            ");
-        }
-        lcd.print(0,1, output);
         break;
       case 4:
-        z = roundf(waterTotal*100)/100;
         lcd.print(0,0,"Vatten totalt");
-        lcd.print(0,1,(String)z);
-          if (z<=9){x = 4;}
-          if (z>=10 && z<=99) {x=5;}
-          if (z>100) {x=6;}
-        lcd.print(x,1,"m³");
         break;
       case 5:
         lcd.print(0,0, "Det regnar!");
@@ -399,7 +380,31 @@ void digitalDisplay() {
           // lcd.print(0,1, hour());
         break;
     }
+
     stepperValueCurrent = stepperValue;
+  }
+  switch (stepperValue) {
+    case 1:
+      lcd.print(8,0, round(soilSens1));
+      lcd.print(8,1, round(soilSens2));
+      break;
+    case 2:
+      output = (String)int(flowRate);
+      output += "L/min  ";
+      lcd.print(0,1,output);
+      break;
+    case 3:
+      z = roundf(waterToday*10000)/10000;
+      output = (String)z;
+      output += "L   ";
+      lcd.print(0,1, output);
+      break;
+    case 4:
+      z = roundf(waterTotal*100)/100;
+      output = (String)z;
+      output += "m³   ";
+      lcd.print(0,1, output);
+      break;
   }
 
 }
@@ -437,54 +442,8 @@ void sendStatsToServer() {
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
 
-
-    // adjustTime();
     // Update LCD values every time stats are sent to server
-    switch (stepperValue) {
-      case 1:
-        lcd.print(8,0, round(soilSens1));
-        lcd.print(8,1, round(soilSens2));
-        break;
-      case 2:
-        // only print L/min if position is changed
-        if (int(flowRate) == 0 ){
-          x = 2;
-        } else {
-          x = floor(log10(abs(int(flowRate)))) + 2; // values above 10 results in X = 3, less then 10 results in x = 2
-        }
-        if (lastX != x) {
-            lcd.print(1,1,"       ");
-            lcd.print(x,1,"L/min");
-        }
-        lcd.print(0,1,int(flowRate));
-        lastX = x;
-      break;
-      case 3:
-        z = roundf(waterToday*10000)/10000;
-        output = (String)z;
-        output += "L";
-        if (z<=9){x = 1;}
-        if (z>=10 && z<=99) {x=2;}
-        if (z>100) {x=3;}
-        if (lastX != x) {
-            lcd.print(0,1,"            ");
-        }
-        lcd.print(0,1, output);
-        break;
-      case 4:
-        z = roundf(waterTotal*100)/100;
-        output = (String)z;
-        output += "m³";
-        if (z<=9){x = 1;}
-        if (z>=10 && z<=99) {x=2;}
-        if (z>100) {x=3;}
-        if (lastX != x) {
-            lcd.print(0,1,"            ");
-        }
-        lcd.print(0,1, output);
-
-        break;
-    }
+    digitalDisplay();
   }
 }
 
@@ -690,7 +649,8 @@ void valveControll(String direction, int valve){
   }
 
 }
-void waterCycle(){
+
+void waterCycle() {
 
   if (launchValve_1 != 0 || launchValve_2 != 0 && !pauseWaterCycle) {
     readSensors("partial");
@@ -713,8 +673,7 @@ void waterCycle(){
             terminal.println("Ventil 1 har öppnats på grund av torka.");
           }
         }
-      }
-      else {
+      }  else {
         if (launchValve_1==1){endMoist = moistLevelScheduleCycleOff;}
         else {endMoist = moistLevelExtraCycleOff;}
 
@@ -817,9 +776,9 @@ void waterCycle(){
 }
 }
 
-void calculateWaterflow(){
+void calculateWaterflow() {
 
-  if (millis()>9000) {
+  if (millis()>4000) {
   // Disable the interrupt while calculating flow rate and sending the value to
   // the host
   if (pulseCount >= 1000) {
@@ -856,44 +815,6 @@ void calculateWaterflow(){
 
 
   }
-  // DateTime now = rtc.now();
-  // int datum;
-  // // Reset water today counter at midnight
-  // if(Blynk.connected()){
-  //   datum = day();
-  // } else {
-  //   datum = now.day();
-  // }
-  //
-  // if (datum != todayDate) {
-  //   waterToday == 0
-  // }
-  //
-  // flowRate = (count / 6.6);        // According to specs Frequency F = 6.6 * Q (Q=L/Min)
-  //
-  // // flowRate = flowRate * 60;         //Convert seconds to minutes, giving you mL / Minute
-  // // flowRate = flowRate / 1000;       //Convert mL to Liters, giving you Liters / Minute
-  // waterTodayAdd = waterTodayAdd + (count / 306);
-  // waterTotal = waterTotal + waterTodayAdd;
-  // // Update LCD values every second if the value is shown
-  // switch (stepperValue) {
-  //   case 3:
-  //     lcd.print(0,1,flowRate);
-  //
-  //   break;
-  //   case 4:
-  //     lcd.print(0,1,waterTodayAdd);
-  //   case 5:
-  //     lcd.print(0,1, waterTotalAdd);
-  //     break;
-  // }
-  //
-  // if (Blynk.connected()){
-  //
-  //   Blynk.virtualWrite(V100, waterTotalAdd);
-  // }
-  // Serial.println(waterTotalAdd);
-  // count = 0;
 }
 
 void readSensors(String type) {
@@ -984,11 +905,8 @@ void readSensors(String type) {
 
     }
   }
-void flow()
-  {
-     pulseCount++; //Every time this function is called, increment "count" by 1
-  }
 
+void flow(){pulseCount++;}
 
 void checkBlynk() {
   if (WiFi.status() == WL_CONNECTED)
@@ -1009,7 +927,7 @@ void checkBlynk() {
   if (WiFi.status() != 3) {
     Serial.print("\tNo WiFi. ");
     connectionCount++;
-    if (connectionCount == 40){ // Reset system if wifi has connected after 40 tries.
+    if (connectionCount == 30){ // Reset system if wifi has connected after 10 minutes.
       connectionCount = 0;
       software_Reset(0);
     }
@@ -1018,9 +936,7 @@ void checkBlynk() {
   Serial.println();
 }
 
-
-void software_Reset(int source) // Restarts program from beginning but does not reset the peripherals and registers
-{
+void software_Reset(int source) {
   if(Blynk.connected()){
     printTimeToTerminal();
     if (source==1){
@@ -1036,7 +952,7 @@ void software_Reset(int source) // Restarts program from beginning but does not 
   ESP.restart();
 }
 
-void adjustTime(){
+void adjustTime() {
   DateTime now = rtc.now();
 
   if (Blynk.connected()){
@@ -1047,6 +963,5 @@ void adjustTime(){
         printTimeToTerminal();
         terminal.println("Fel på systemklocka. Försök starta om systemet.");
         terminal.flush();}
-    //software_Reset(0);
   }
 }
