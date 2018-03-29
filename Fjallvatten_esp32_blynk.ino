@@ -85,12 +85,12 @@ unsigned int flowMilliLitres;
 
 unsigned long oldTime;
 int todayDate;
-int x, lastX ;
+int x, lastX, y = 0;
 double z;
 String output;
 
 
-
+bool blinkState = false;
 int stepperValue, stepperValueCurrent;
 int sensorCycle;
 bool rainSens; // HIGH means it's not raining
@@ -101,10 +101,9 @@ int pausendH = 0;
 int pausendM = 0;
 int appSwitch1;
 int appSwitch2;
-int appSwitchLastState1;
-int appSwitchLastState2;
 int switchState1 = false;
 int switchState2 = false;
+int pauseSwitch  = 0, pauseSwitchState = false;
 int endMoist;
 int valveOpen1, valveOpen2;
 bool wateringOnValve_1, wateringOnValve_2;
@@ -144,9 +143,7 @@ BLYNK_WRITE(V1){moistLevelScheduleCycleOff = param.asInt();}
 BLYNK_WRITE(V2){moistlevelExtreme = param.asInt();}
 BLYNK_WRITE(V3){moistLevelExtraCycleOff = param.asInt();}
 BLYNK_WRITE(V4){autoLaunch = param.asInt();}
-BLYNK_WRITE(V12){
-  if (param.asInt() == 1){pausePressed();}
-}
+BLYNK_WRITE(V12){pauseSwitch = param.asInt();}
 BLYNK_WRITE(V13){appSwitch1 = param.asInt();}
 BLYNK_WRITE(V14){appSwitch2 = param.asInt();}
 BLYNK_WRITE(V18){
@@ -202,9 +199,7 @@ void setup()
   // Debug console
   Serial.begin(9600);
 
-
       pinMode(SENSORS_VCC, OUTPUT);
-
       pinMode(ERROR_LED1_PIN, OUTPUT);
       pinMode(ERROR_LED2_PIN, OUTPUT);
       pinMode(VALVE_PIN_1, OUTPUT);
@@ -224,10 +219,6 @@ void setup()
       pinMode(FLOWPIN, INPUT_PULLUP);           //Sets the pin as an input
       attachInterrupt(digitalPinToInterrupt(FLOWPIN), flow, RISING);  //Configures interrupt 0 (pin 2 on the Arduino Uno) to run the function "Flow"
 
-      // gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-      //
-      // gpio_isr_handler_add(FLOWPIN, flow);
-
 
     if(WiFi.status() == 6){
         Serial.println("\tWiFi not connected yet.");
@@ -238,9 +229,9 @@ void setup()
     timer.setInterval(60000L, runAutonomously); //once a minute
     timer.setInterval(10, runManually);
     timer.setInterval(1000, waterCycle);
-    timer.setInterval(10, digitalDisplay);
+    // timer.setInterval(10, digitalDisplay);
     timer.setInterval(1000,calculateWaterflow);
-    // timer.setInterval(100, digitalDisplay);
+    timer.setInterval(500,blinkLED);
 
 
 
@@ -373,9 +364,9 @@ void digitalDisplay() {
         lcd.print(0,0,"Vatten totalt");
         break;
       case 5:
-        lcd.print(0,0, "Det regnar!");
+        lcd.print(0,0, "Bevattningen pausad");
         break;
-      case 7:
+      case 6:
           lcd.print(0,0, "Pause indication");
           // lcd.print(0,1, hour());
         break;
@@ -405,6 +396,18 @@ void digitalDisplay() {
       output += "m³   ";
       lcd.print(0,1, output);
       break;
+    case 5:
+      if (pauseWaterCycle) {
+        output = "till ";
+        if (pausendH <=9) {output += "0";}
+        output += pausendH;
+        output += ":";
+        if (pausendM <=9) {output += "0";}
+        output += pausendM;
+      } else {
+        output = "Paus avslutad";
+      }
+      lcd.print(0,1, output);
   }
 
 }
@@ -597,7 +600,12 @@ void runManually() {
         }
       }
     }
+
+    pausePressed();
+
     if (Blynk.connected()) {terminal.flush();}
+    if (stepperValue != stepperValueCurrent){digitalDisplay();}
+
   }
 }
 
@@ -844,65 +852,69 @@ void readSensors(String type) {
   }
 
   void printTimeToTerminal(){
-    DateTime now = rtc.now();
-
-    int tagHour, tagMinute, tagMonth, tagDay;
-    if(Blynk.connected()){
-      tagMonth = month();
-      tagDay = day();
-      tagHour = hour();
-      tagMinute = minute();
-    } else {
-      tagMonth = now.month();
-      tagDay = now.day();
-      tagHour = now.hour();
-      tagMinute = now.minute();
-
-    }
-    // terminal.print(now.month(), DEC);
-    // terminal.print('-');
-    // terminal.print(now.day(), DEC);
-    terminal.print("[");
-    terminal.print(tagDay);
-    terminal.print("/");
-    terminal.print(tagMonth);
-    terminal.print(" ");
-    if (tagHour<10){terminal.print('0');}
-    terminal.print(tagHour, DEC);
-    terminal.print(':');
-    if (tagMinute<10){terminal.print('0');}
-    terminal.print(tagMinute, DEC);
-    terminal.print("]");
-    terminal.print(' ');
+    output = "[";
+    output += day();
+    output +="/";
+    output += month();
+    output +=" ";
+    if (hour()<10){output +="0";}
+    output += hour();
+    output += ':';
+    if (minute()<10){output += "0";}
+    output += minute();
+    output += "] ";
+    terminal.print(output);
   }
 
   void pausePressed() {
+    int pauseInitiate = 0, tempMin, tempHour;
+    long endPauseTime;
 
-    DateTime now = rtc.now();
-    if(Blynk.connected()){
-      int endPauseTime = hour() * 3600 + minute() * 60 + pauseTime * 60;
-    } else{
-        int endPauseTime = now.hour() * 3600 + now.minute() * 60 + pauseTime * 60;
-    }
+    // Start checking state of pause buttons
+    if ((pauseSwitch == 1 || digitalRead(PAUSE_PIN)== HIGH) && !pauseWaterCycle ){pauseInitiate = 1;}
+    // Now check if physical pause button is pressed
+    // if (digitalRead(PAUSE_PIN)== HIGH){pauseInitiate = 1;}
 
-    int pauseMinTemp;
-    int pauseHours;
-    if (digitalRead(PAUSE_PIN)==HIGH ){
-      pauseWaterCycle=true;
+    // Initiate pause mode
+    if (pauseInitiate == 1) {
       digitalWrite(VALVE_PIN_1,LOW);
       digitalWrite(VALVE_PIN_2,LOW);
+      if(Blynk.connected()){
+        tempHour = hour();
+        tempMin = minute();
+      } else{
+        DateTime now = rtc.now();
+        tempHour = now.hour();
+        tempMin = now.minute();
+      }
 
-      //checkTime();
-      pauseMinTemp = now.minute() + pauseTime;
-      pauseHours = 0;
+      endPauseTime = tempHour * 3600 + tempMin * 60 + pauseTime * 60; // calculate when pause chould end in millis
+      pauseWaterCycle = true;
+
+      int pauseMinTemp = tempMin + pauseTime;
+      int pauseHours = 0;
       // Calculate pause end time
       while(pauseMinTemp>60){
         pauseHours++;
         pauseMinTemp = pauseMinTemp-60;
       }
-      pausendH = now.hour()+pauseHours;
-      pausendM = now.minute()+(pauseTime-(pauseHours*60));
+      pausendH = tempHour+pauseHours;
+      pausendM = tempMin+(pauseTime-(pauseHours*60));
+      stepperValue = 5; // Display pause end time in app
+      if (Blynk.connected()){Blynk.virtualWrite(V17,5);}
+      blinkState = true;
+      pauseInitiate = 0;
+    }
 
+    // Watch if pause is finished
+    if (pauseWaterCycle) {
+      long currentTimeInSeconds = tempHour * 3600 + tempMin * 60; // calculate when pause chould end in seconds
+      if (currentTimeInSeconds >= endPauseTime ) {
+        pauseWaterCycle = false;
+        stepperValue = 1;
+        blinkState = false;
+        if (Blynk.connected()){Blynk.virtualWrite(V17,1);}
+      }
     }
   }
 
@@ -963,5 +975,25 @@ void adjustTime() {
         printTimeToTerminal();
         terminal.println("Fel på systemklocka. Försök starta om systemet.");
         terminal.flush();}
+  }
+}
+
+void blinkLED() {
+  // If system is paused, blink error-LEDs
+  if (blinkState) {
+    if (y=0) {
+      digitalWrite(ERROR_LED1_PIN, HIGH);
+      digitalWrite(ERROR_LED2_PIN, LOW);
+      y=1;}
+    else {
+      digitalWrite(ERROR_LED1_PIN, LOW);
+      digitalWrite(ERROR_LED2_PIN, HIGH);
+      y=0;}
+  } else {
+    // if pause is no longer active, return error - leds to their previous state
+    if (errorValve1) {digitalWrite(ERROR_LED1_PIN, HIGH);}
+      else {digitalWrite(ERROR_LED1_PIN, LOW);}
+    if (errorValve2) {digitalWrite(ERROR_LED2_PIN, HIGH);}
+      else {digitalWrite(ERROR_LED2_PIN, LOW);}
   }
 }
