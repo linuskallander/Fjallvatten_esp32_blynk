@@ -60,9 +60,6 @@ int minuteLaunch = 30;
 int autoLaunch = (3600 * 5 + 60 * 30); //Time to launch automatic watering, in seconds. (3600 * hour + 60 * minutes)
 int launchValve_1 = 0; // 0 = off, 1 = scheduled, 2=extreme
 int launchValve_2 = 0;
-bool disableExtreme = false;
-bool disableSchedule = false;
-bool disableManual = false;
 bool limitWater = false; // Set to 1 if there is a water restriction in Gnesta.
 int nightModeHourStart = 21*3600; //No extra watering during night hours
 int nightModeHourEnd = 7*3600;
@@ -72,10 +69,14 @@ int moistLevelLow = 30;
 int moistLevelScheduleCycleOff = 50;
 int moistLevelExtraCycleOff = 40;
 
-int maxCycle = 1;  //Maximum time of watercycle
+int maxCycle = 10;  //Maximum time of watercycle
 int pauseTime = 60; // duration to pause on force pause, in minutes.
 
 //VARIABLES
+
+bool disableExtreme = false;
+bool disableSchedule = false;
+bool disableManual = false;
 double flowRate;    //This is the value we intend to calculate.
 volatile double pulseCount; //This integer needs to be set as volatile to ensure it updates correctly during the interrupt process.
 double waterTotal, waterForever;
@@ -88,7 +89,7 @@ int todayDate;
 int x, lastX, y = 0;
 double z;
 String output;
-
+int requestInput;
 
 bool blinkState = false;
 int stepperValue, stepperValueCurrent;
@@ -174,8 +175,41 @@ BLYNK_WRITE(V20){
     terminal.println("RWT: Reset this years watercounter");
     terminal.println("R4EVER: Reset total watercounter");
     terminal.println("SHOW4EVER: Display total watercounter");
+    terminal.println("LIMIT: Switch water limitation on and off");
+    terminal.println("MAXCYCLE: How long should irrigation run?");
+    terminal.println("PAUSETIME: How long is the pause time?");
   }
-  else {terminal.println("\nUnrecognized command. Type help to see available commands.");}
+  else if (String("LIMIT") == param.asStr()) {
+    if (limitWater) {
+      terminal.println("\nWater limitation is turned off");
+      limitWater=false;}
+    else {
+      terminal.println("\nWater limitation is turned on");
+      limitWater = true;}
+  }
+  else if (String("MAXCYCLE") == param.asStr()) {
+    terminal.println("\nSet max cycle time in minutes:");
+     requestInput = 1;
+  }
+  else if (String("PAUSETIME") == param.asStr()) {
+    terminal.println("\nSet pause time in minutes:");
+     requestInput = 2;
+  }
+  else {
+    if (requestInput == 1) {
+      maxCycle = param.asInt();
+      Blynk.virtualWrite(V96, maxCycle);
+      terminal.println("\nMax cycle is changed");
+    }
+    else if (requestInput == 2) {
+      pauseTime = param.asInt();
+      Blynk.virtualWrite(V95, pauseTime);
+      terminal.println("\Pause time is changed");
+    }
+    else {
+    terminal.println("\nUnrecognized command. Type help to see available commands.");
+    }
+  }
   terminal.flush();
 }
 BLYNK_WRITE(V9){
@@ -191,6 +225,8 @@ BLYNK_WRITE(V100) {waterTotal = param.asDouble();}
 BLYNK_WRITE(V99) {waterToday = param.asDouble();}
 BLYNK_WRITE(V98) {waterForever = param.asDouble();}
 BLYNK_WRITE(V97) {todayDate = param.asInt();}
+BLYNK_WRITE(V96) {maxCycle = param.asInt();}
+BLYNK_WRITE(V95) {pauseTime = param.asInt();}
 
 
 void setup()
@@ -364,10 +400,10 @@ void digitalDisplay() {
         lcd.print(0,0,"Vatten totalt");
         break;
       case 5:
-        lcd.print(0,0, "Bevattningen pausad");
+        lcd.print(0,0, "Paus");
         break;
       case 6:
-          lcd.print(0,0, "Pause indication");
+          lcd.print(0,0, "Pause");
           // lcd.print(0,1, hour());
         break;
     }
@@ -405,7 +441,7 @@ void digitalDisplay() {
         if (pausendM <=9) {output += "0";}
         output += pausendM;
       } else {
-        output = "Paus avslutad";
+        output = "avslutad";
       }
       lcd.print(0,1, output);
   }
@@ -435,18 +471,21 @@ void sendStatsToServer() {
     readSensors("partial");
     digitalWrite(LED_BUILTIN, HIGH);
     digitalWrite(WIFI_LED, HIGH);
+
+    // These values should update
     Blynk.virtualWrite(V10, soilSens1);
     Blynk.virtualWrite(V11, soilSens2);
     if(valveState1){Blynk.virtualWrite(V15,100);}
     if(valveState2){Blynk.virtualWrite(V16,100);}
     Blynk.virtualWrite(V100, waterTotal);
     Blynk.virtualWrite(V99, waterToday);
+    Blynk.virtualWrite(V25, waterTotal);
+
     delay(20);
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
 
-    // Update LCD values every time stats are sent to server
-    digitalDisplay();
+    digitalDisplay(); // Update LCD values every time stats are sent to server
   }
 }
 
@@ -691,7 +730,7 @@ void waterCycle() {
         }
         else {
           if ((millis() - valveOpened_1) >= (maxCycle*60*1000)){
-            if (soilSens1StartingValue >= soilSens1 - 2 && soilSens1StartingValue <= soilSens1 + 2 ) {
+            if (soilSens1StartingValue >= soilSens1 - 3 && soilSens1StartingValue <= soilSens1 + 3 ) {
               //Error
               digitalWrite(ERROR_LED1_PIN, HIGH);
               errorValve1 = true;
@@ -747,7 +786,7 @@ void waterCycle() {
         }
         else {
           if ((millis() - valveOpened_2) >= (maxCycle*60*1000)){
-            if (soilSens2StartingValue >= soilSens2 - 2 && soilSens2StartingValue <= soilSens2 + 2 ) {
+            if (soilSens2StartingValue >= soilSens2 - 3 && soilSens2StartingValue <= soilSens2 + 3 ) {
               //Error
               digitalWrite(ERROR_LED2_PIN, HIGH);
               errorValve2 = true;
@@ -913,7 +952,11 @@ void readSensors(String type) {
         pauseWaterCycle = false;
         stepperValue = 1;
         blinkState = false;
-        if (Blynk.connected()){Blynk.virtualWrite(V17,1);}
+        if (Blynk.connected()){
+          Blynk.virtualWrite(V17,1);
+          Blynk.virtualWrite(V12,0);
+        }
+
       }
     }
   }
@@ -984,11 +1027,14 @@ void blinkLED() {
     if (y=0) {
       digitalWrite(ERROR_LED1_PIN, HIGH);
       digitalWrite(ERROR_LED2_PIN, LOW);
-      y=1;}
+      y=1;
+      }
     else {
       digitalWrite(ERROR_LED1_PIN, LOW);
       digitalWrite(ERROR_LED2_PIN, HIGH);
-      y=0;}
+      y=0;
+
+    }
   } else {
     // if pause is no longer active, return error - leds to their previous state
     if (errorValve1) {digitalWrite(ERROR_LED1_PIN, HIGH);}
