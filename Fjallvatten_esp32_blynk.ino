@@ -50,7 +50,7 @@ WidgetLCD lcd(V22);
 #define PAUSE_PIN 27
 #define LED_BUILTIN 2
 #define WIFI_LED 13
-#define FLOWPIN 15
+#define FLOWPIN 19
 #define TEMP_SENS 39
 
 
@@ -80,7 +80,7 @@ bool disableManual = false;
 double flowRate;    //This is the value we intend to calculate.
 volatile double pulseCount; //This integer needs to be set as volatile to ensure it updates correctly during the interrupt process.
 double waterTotal, waterForever;
-double waterToday, waterSinceLastUpdate;
+unsigned int waterToday, waterSinceLastUpdate;
 float calibrationFactor = 6.6;
 unsigned int flowMilliLitres;
 
@@ -90,8 +90,9 @@ int x, lastX, y = 0;
 double z;
 String output;
 int requestInput;
+long endPauseTime;
 
-bool blinkState = false;
+bool firstRun = true;
 int stepperValue, stepperValueCurrent;
 int sensorCycle;
 bool rainSens; // HIGH means it's not raining
@@ -152,6 +153,8 @@ BLYNK_WRITE(V18){
 BLYNK_WRITE(V17){
   stepperValue = param.asInt();
 }
+BLYNK_WRITE(V96) {maxCycle = param.asInt();}
+BLYNK_WRITE(V95) {pauseTime = param.asInt();}
 BLYNK_WRITE(V20){
 
   if (String("RWT") == param.asStr()) {
@@ -162,6 +165,7 @@ BLYNK_WRITE(V20){
 
   else if (String("R4EVER") == param.asStr()) {
     Blynk.virtualWrite(V98, 0);
+    waterForever = 0;
     terminal.println("\nForever watercounter is reset.");
   }
 
@@ -176,8 +180,12 @@ BLYNK_WRITE(V20){
     terminal.println("R4EVER: Reset total watercounter");
     terminal.println("SHOW4EVER: Display total watercounter");
     terminal.println("LIMIT: Switch water limitation on and off");
-    terminal.println("MAXCYCLE: How long should irrigation run?");
-    terminal.println("PAUSETIME: How long is the pause time?");
+    terminal.print("MAXCYCLE: How long should irrigation run? Current value:");
+    terminal.println(maxCycle);
+    terminal.print("PAUSETIME: How long is the pause time? Current value:");
+    terminal.println(pauseTime);
+    terminal.println("CLEAR: Empty terminal");
+
   }
   else if (String("LIMIT") == param.asStr()) {
     if (limitWater) {
@@ -195,19 +203,26 @@ BLYNK_WRITE(V20){
     terminal.println("\nSet pause time in minutes:");
      requestInput = 2;
   }
+  else if (String("CLEAR") == param.asStr()) {
+    for (int i=0; i <= 25; i++){
+      terminal.println("");
+    }
+  }
   else {
     if (requestInput == 1) {
       maxCycle = param.asInt();
       Blynk.virtualWrite(V96, maxCycle);
       terminal.println("\nMax cycle is changed");
+      requestInput == 0;
     }
     else if (requestInput == 2) {
       pauseTime = param.asInt();
       Blynk.virtualWrite(V95, pauseTime);
       terminal.println("\Pause time is changed");
+      requestInput == 0;
     }
     else {
-    terminal.println("\nUnrecognized command. Type help to see available commands.");
+
     }
   }
   terminal.flush();
@@ -225,8 +240,6 @@ BLYNK_WRITE(V100) {waterTotal = param.asDouble();}
 BLYNK_WRITE(V99) {waterToday = param.asDouble();}
 BLYNK_WRITE(V98) {waterForever = param.asDouble();}
 BLYNK_WRITE(V97) {todayDate = param.asInt();}
-BLYNK_WRITE(V96) {maxCycle = param.asInt();}
-BLYNK_WRITE(V95) {pauseTime = param.asInt();}
 
 
 void setup()
@@ -324,7 +337,12 @@ void setup()
     }
 
     DateTime now = rtc.now();
-    if (Blynk.connected()){adjustTime();}
+    if (Blynk.connected()){
+      adjustTime();
+      todayDate = day();
+    } else {
+      todayDate = now.day();
+    }
 
     // Code for OTA updates
 
@@ -417,19 +435,19 @@ void digitalDisplay() {
       break;
     case 2:
       output = (String)int(flowRate);
-      output += "L/min  ";
+      output += " L/min    ";
       lcd.print(0,1,output);
       break;
     case 3:
       z = roundf(waterToday*10000)/10000;
       output = (String)z;
-      output += "L   ";
+      output += " liter     ";
       lcd.print(0,1, output);
       break;
     case 4:
       z = roundf(waterTotal*100)/100;
       output = (String)z;
-      output += "m³   ";
+      output += " m³     ";
       lcd.print(0,1, output);
       break;
     case 5:
@@ -441,7 +459,7 @@ void digitalDisplay() {
         if (pausendM <=9) {output += "0";}
         output += pausendM;
       } else {
-        output = "avslutad";
+        output = "avslutad   ";
       }
       lcd.print(0,1, output);
   }
@@ -459,7 +477,7 @@ void sendStatsToServer() {
     if (day() != todayDate){
       Blynk.virtualWrite(V99, 0);
       Blynk.virtualWrite(V26, waterToday);
-      Blynk.virtualWrite(V98, waterForever + waterToday);
+      Blynk.virtualWrite(V98, waterForever + waterToday/1000);
       waterToday = 0;
       todayDate = day();
     }
@@ -481,7 +499,6 @@ void sendStatsToServer() {
     Blynk.virtualWrite(V99, waterToday);
     Blynk.virtualWrite(V25, waterTotal);
 
-    delay(20);
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
 
@@ -649,6 +666,8 @@ void runManually() {
 }
 
 void valveControll(String direction, int valve){
+
+  detachInterrupt(digitalPinToInterrupt(FLOWPIN));
   switch (valve) {
     case 1:
       if (direction == "open"){
@@ -694,7 +713,7 @@ void valveControll(String direction, int valve){
     default:
       if (Blynk.connected()){terminal.println("DEBUG: Valve action called without specified valve id.");}
   }
-
+  attachInterrupt(digitalPinToInterrupt(FLOWPIN), flow, RISING);
 }
 
 void waterCycle() {
@@ -824,13 +843,24 @@ void waterCycle() {
 }
 
 void calculateWaterflow() {
+  // Serial.println(pulseCount);
+  if (pulseCount>0){
+    terminal.print(millis());
+    terminal.print(" Pulse:");
+    terminal.println(pulseCount);
+  }
 
-  if (millis()>4000) {
+  // if (firstRun) {
+  //   oldTime = millis();
+  //   pulseCount = 0;
+  //   firstRun = false;}
+  if (millis()==oldTime){
+    terminal.println("millis is old");
+  }
+  else {
   // Disable the interrupt while calculating flow rate and sending the value to
   // the host
-  if (pulseCount >= 1000) {
-      pulseCount == 0;
-  }
+
   detachInterrupt(digitalPinToInterrupt(FLOWPIN));
 
 
@@ -844,6 +874,7 @@ void calculateWaterflow() {
   // disabled interrupts the millis() function won't actually be incrementing right
   // at this point, but it will still return the value it was set to just before
   // interrupts went away.
+  int tempOld = oldTime;
   oldTime = millis();
   // Reset the pulse counter so we can start incrementing again
   pulseCount = 0;
@@ -858,7 +889,14 @@ void calculateWaterflow() {
   // Add the millilitres passed in this second to a cumulative variable thats added to value stored online
   waterSinceLastUpdate += flowMilliLitres;
 
+  if (waterSinceLastUpdate>0){
+    terminal.print(millis());
+    terminal.print(" waterSinceLastUpdate:");
+    terminal.println(waterSinceLastUpdate);
+    terminal.print("oldtime:");
+    terminal.println(tempOld);
 
+  }
 
 
   }
@@ -876,9 +914,9 @@ void readSensors(String type) {
     delay(d);
 
     // soil sensors
-    soilSens1 = map((analogRead(SOIL_SENS_PIN_1)), 3980, 1600, 0, 100);
+    soilSens1 = map((analogRead(SOIL_SENS_PIN_1)), 4095, 1600, 0, 100);
     delay(d); //make sure the sensor is powered
-    soilSens2 = map((analogRead(SOIL_SENS_PIN_2)), 3980, 1600, 0, 100);
+    soilSens2 = map((analogRead(SOIL_SENS_PIN_2)), 4095, 1600, 0, 100);
 
 
     // Serial.println(analogRead(SOIL_SENS_PIN_2));
@@ -890,7 +928,7 @@ void readSensors(String type) {
     }
   }
 
-  void printTimeToTerminal(){
+void printTimeToTerminal(){
     output = "[";
     output += day();
     output +="/";
@@ -905,61 +943,55 @@ void readSensors(String type) {
     terminal.print(output);
   }
 
-  void pausePressed() {
-    int pauseInitiate = 0, tempMin, tempHour;
-    long endPauseTime;
+void pausePressed() {
+  int pauseInitiate = 0, tempMin, tempHour;
 
-    // Start checking state of pause buttons
-    if ((pauseSwitch == 1 || digitalRead(PAUSE_PIN)== HIGH) && !pauseWaterCycle ){pauseInitiate = 1;}
+  if(Blynk.connected()){
+    tempHour = hour();
+    tempMin = minute();
+  }
+  else{
+    DateTime now = rtc.now();
+    tempHour = now.hour();
+    tempMin = now.minute();
+  }
+
+  long currentTimeInSeconds = tempHour * 3600 + tempMin * 60;
+  // Start checking state of pause buttons
+  if ((pauseSwitch == 1 || digitalRead(PAUSE_PIN)== HIGH) && !pauseWaterCycle ){
     // Now check if physical pause button is pressed
     // if (digitalRead(PAUSE_PIN)== HIGH){pauseInitiate = 1;}
 
     // Initiate pause mode
-    if (pauseInitiate == 1) {
-      digitalWrite(VALVE_PIN_1,LOW);
-      digitalWrite(VALVE_PIN_2,LOW);
-      if(Blynk.connected()){
-        tempHour = hour();
-        tempMin = minute();
-      } else{
-        DateTime now = rtc.now();
-        tempHour = now.hour();
-        tempMin = now.minute();
-      }
+    digitalWrite(VALVE_PIN_1,LOW);
+    digitalWrite(VALVE_PIN_2,LOW);
 
-      endPauseTime = tempHour * 3600 + tempMin * 60 + pauseTime * 60; // calculate when pause chould end in millis
-      pauseWaterCycle = true;
+    endPauseTime = currentTimeInSeconds + pauseTime * 60; // calculate when pause chould end in millis
+    pauseWaterCycle = true;
 
-      int pauseMinTemp = tempMin + pauseTime;
-      int pauseHours = 0;
-      // Calculate pause end time
-      while(pauseMinTemp>60){
-        pauseHours++;
-        pauseMinTemp = pauseMinTemp-60;
-      }
-      pausendH = tempHour+pauseHours;
-      pausendM = tempMin+(pauseTime-(pauseHours*60));
-      stepperValue = 5; // Display pause end time in app
-      if (Blynk.connected()){Blynk.virtualWrite(V17,5);}
-      blinkState = true;
-      pauseInitiate = 0;
+    int pauseMinTemp = tempMin + pauseTime;
+    int pauseHours = 0;
+    // Calculate pause end time
+    while(pauseMinTemp>60){
+      pauseHours++;
+      pauseMinTemp = pauseMinTemp-60;
     }
+    pausendH = tempHour+pauseHours;
+    pausendM = tempMin+(pauseTime-(pauseHours*60));
+    stepperValue = 5; // Display pause end time in app
+    if (Blynk.connected()){Blynk.virtualWrite(V17,5);}
 
+  } else {
     // Watch if pause is finished
     if (pauseWaterCycle) {
-      long currentTimeInSeconds = tempHour * 3600 + tempMin * 60; // calculate when pause chould end in seconds
+      // Serial.println(currentTimeInSeconds);
+      //   Serial.println(endPauseTime);
       if (currentTimeInSeconds >= endPauseTime ) {
         pauseWaterCycle = false;
-        stepperValue = 1;
-        blinkState = false;
-        if (Blynk.connected()){
-          Blynk.virtualWrite(V17,1);
-          Blynk.virtualWrite(V12,0);
-        }
-
       }
     }
   }
+}
 
 void flow(){pulseCount++;}
 
@@ -1023,8 +1055,8 @@ void adjustTime() {
 
 void blinkLED() {
   // If system is paused, blink error-LEDs
-  if (blinkState) {
-    if (y=0) {
+  if (pauseWaterCycle) {
+    if (y==0) {
       digitalWrite(ERROR_LED1_PIN, HIGH);
       digitalWrite(ERROR_LED2_PIN, LOW);
       y=1;
@@ -1033,7 +1065,6 @@ void blinkLED() {
       digitalWrite(ERROR_LED1_PIN, LOW);
       digitalWrite(ERROR_LED2_PIN, HIGH);
       y=0;
-
     }
   } else {
     // if pause is no longer active, return error - leds to their previous state
@@ -1042,4 +1073,5 @@ void blinkLED() {
     if (errorValve2) {digitalWrite(ERROR_LED2_PIN, HIGH);}
       else {digitalWrite(ERROR_LED2_PIN, LOW);}
   }
+
 }
