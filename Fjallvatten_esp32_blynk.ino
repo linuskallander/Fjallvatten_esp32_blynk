@@ -20,8 +20,8 @@ char auth[] = "721dbb4ddb714f71835d52ec2626cb56";
 
 // Your WiFi credentials.
 // Set password to "" for open networks.
-char ssid[] = "Samboslottet_2GHz";
-char pass[] = "abc123def";
+char ssid[] = "Fjällvatten";
+char pass[] = "";
 char server[] = "blynk-cloud.com";
 
 BlynkTimer timer;
@@ -37,20 +37,21 @@ WidgetLCD lcd(V22);
 // PINS
 #define SOIL_SENS_PIN_1 A7
 #define SOIL_SENS_PIN_2 A6
-#define SENSORS_VCC 23 // powers soilsensors and rainsensor
-#define RAIN_SENS_PIN 5
-#define VALVE_PIN_1 12
-#define VALVE_PIN_2 14
 #define VALVE_LEDPIN_1 32
 #define VALVE_LEDPIN_2 33
-#define ERROR_LED1_PIN 25 //temporary
+#define ERROR_LED1_PIN 25
 #define ERROR_LED2_PIN 26
+#define WIFI_LED 27
+#define FLOWPIN 14
+#define VALVE_PIN_1 12
+#define VALVE_PIN_2 13
+
+#define SENSORS_VCC 23 // powers soilsensors and rainsensor
+#define RAIN_SENS_PIN 5
 #define MANUAL_VALVE_PIN_1 18
 #define MANUAL_VALVE_PIN_2 4
-#define PAUSE_PIN 27
+#define PAUSE_PIN 19
 #define LED_BUILTIN 2
-#define WIFI_LED 13
-#define FLOWPIN 19
 #define TEMP_SENS 39
 
 
@@ -82,12 +83,12 @@ bool disableManual = false;
 double flowRate;    //This is the value we intend to calculate.
 volatile double pulseCount; //This integer needs to be set as volatile to ensure it updates correctly during the interrupt process.
 double waterTotal, waterForever;
-unsigned int waterToday, waterSinceLastUpdate;
+unsigned int waterToday, waterSinceLastUpdate, waterHour;
 float calibrationFactor = 6.6;
 unsigned int flowMilliLitres;
 
 unsigned long oldTime;
-int todayDate;
+int todayDate, lastHour;
 int x, lastX, y = 0;
 double z;
 String output;
@@ -545,9 +546,19 @@ void sendStatsToServer() {
       waterToday = 0;
       todayDate = day();
     }
+
+
     waterTotal += (waterSinceLastUpdate/1000000); //Store totals water as cubic meters
     waterToday += (waterSinceLastUpdate/1000); // Store todays water as liters
+    waterHour += (waterSinceLastUpdate/1000); // Store last hour's water as liters
     waterSinceLastUpdate = 0;
+
+    if (hour() != lastHour && timeStatus != 0) {
+      Blynk.virtualWrite(V26, waterHour);
+      Blynk.virtualWrite(V25, waterTotal);
+      waterHour = 0;
+      lastHour = hour();
+    }
 
 
     readSensors("partial");
@@ -561,8 +572,7 @@ void sendStatsToServer() {
     if(valveState2){Blynk.virtualWrite(V16,100);}
     Blynk.virtualWrite(V100, waterTotal);
     Blynk.virtualWrite(V99, waterToday);
-    Blynk.virtualWrite(V25, waterTotal);
-    Blynk.virtualWrite(V26, waterToday);
+    Blynk.virtualWrite(V64, 1023);
 
     digitalWrite(LED_BUILTIN, LOW);
     digitalWrite(WIFI_LED, LOW);
